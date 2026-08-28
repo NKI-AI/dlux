@@ -1,0 +1,11 @@
+# @package hydra
+run:
+  # Disposable per-run output dir. Each bin overrides hydra.run.dir in its own config to group its
+  # logs by its real subject (train: task/experiment/fold; aggregate/evaluate: experiment;
+  # build/analyze: study/cohort; extract/profile: cohort). This fallback — grouped by job name —
+  # only fires if a bin forgets to override; it never produces the old _misc/_misc/_misc. Microsecond
+  # precision (%f) keeps same-second reruns distinct; bins additionally write an atomic run_marker.json
+  # to detect any residual collision loudly.
+  dir: ${paths.log_dir}/${hydra.job.name}/${now:%Y-%m-%d}_${now:%H-%M-%S-%f}
+job:
+  chdir: false

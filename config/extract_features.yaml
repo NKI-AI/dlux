@@ -1,0 +1,36 @@
+# @package _global_
+defaults:
+  # Both REQUIRED and cross-checked: the cohort must be one the study declares.
+  - study: ???
+  - cohort: ???
+  - tiling: uni2_2mpp
+  - feature_extractor: uni2_tile
+  - paths: default
+  - hydra: default
+  - _self_
+  - optional local/paths: default
+  - optional project/paths: default
+  - optional local/misc: default
+hydra:
+  # A consumer project supplies its own `catalog/` (cohorts, studies, experiments) and `config/`
+  # (custom tasks/models + its cohort paths). Both are search-path roots. Paths are relative to the
+  # process working directory (the repo root); set
+  # DLUX_PROJECT to a consumer project root (it supplies catalog/ and config/).
+  searchpath:
+    - file://${oc.env:DLUX_PROJECT,.}/catalog
+    - file://${oc.env:DLUX_PROJECT,.}/config
+  run:
+    dir: ${paths.log_dir}/extract_features/${cohort.name}/${now:%Y-%m-%d}_${now:%H-%M-%S-%f}
+# Enumerate the manifest and report the slide count without extracting (CPU-only;
+# no JIT / GPU needed). Use to sanity-check a cohort before a long extraction.
+dry_run: false
+# Write summary.md + tiles.png next to the cache's manifest.json once extraction settles, including a
+# num_tiles recommendation read off the tiles-per-slide distribution. Cheap (metadata-only reads).
+analyze: true
+precomputer:
+  batch_size: 256
+  num_workers: 0 # per-GPU dataloader workers; 0 = read in-process (robust everywhere). Raise it (e.g. toward your core count) to speed up slide reading on a capable machine.
+  devices: auto # int (e.g. 4) or "auto" for all visible CUDA devices; 1 = single process
+  only_missing: true # skip slides already cached; delete the READY marker to force re-extraction
+  verify_cached: false # opt-in: re-check each cached slide's tile count vs the freshly-built grid,
+  # re-extracting only the slides whose grid changed (e.g. after a dlup tiling fix) — cheap, off by default

@@ -1,0 +1,52 @@
+# @package _global_
+defaults:
+  # Both REQUIRED and cross-checked. study = which experiment (assigns each cohort a role → split
+  # strategy); cohort = which of its cohorts to build, one run per cohort.
+  - study: ???
+  - cohort: ???
+  - paths: default
+  - hydra: default
+  - _self_
+  - optional local/paths: default
+  - optional project/paths: default
+  - optional local/misc: default
+hydra:
+  # A consumer project supplies its own `catalog/` (cohorts, studies, experiments) and `config/`
+  # (custom tasks/models + its cohort paths). Both are search-path roots. Paths are relative to the
+  # process working directory (the repo root); set
+  # DLUX_PROJECT to a consumer project root (it supplies catalog/ and config/).
+  searchpath:
+    - file://${oc.env:DLUX_PROJECT,.}/catalog
+    - file://${oc.env:DLUX_PROJECT,.}/config
+  run:
+    dir: ${paths.log_dir}/build_db/${study.name}/${cohort.name}/${now:%Y-%m-%d}_${now:%H-%M-%S-%f}
+# The rigid input sheets (see dlux_notes/SHEET_SPEC.md). Default to the cohort's canonical
+# layout-A location; override only if the sheets live elsewhere.
+patients_csv: ${paths.cohorts_dir}/${cohort.name}/sheets/patients.csv
+slides_csv: ${paths.cohorts_dir}/${cohort.name}/sheets/slides.csv
+# Slide validation depth:
+#   none     — don't open slides (geometry NULL); test sheet/split logic without WSIs.
+#   metadata — open the header only; fast (~ms/slide), records real geometry. (default)
+#   full     — construct the tiling dataset (parse mask + build grid, require non-empty);
+#              slower but catches broken masks / foreground failures / empty grids.
+probe: metadata
+# Representative grid used ONLY when probe=full (mask_threshold 0.0 = validate tiling runs).
+probe_grid:
+  mpp: 2.0
+  tile_size: [224, 224]
+  tile_overlap: [0, 0]
+  mask_threshold: 0.0
+# Predefined CV splits (see docs/specs/SPLITS_SPEC.md). By default build_db draws the split;
+# set import_from to a patient->fold CSV (the `<cohort>_splits.csv` build_db always emits) to write that
+# assignment verbatim instead — so two cohorts share identical folds. allow_uncovered permits the file to
+# cover only a subset of this cohort's labelled patients (the matched cross-cohort intersection case);
+# left false, a labelled patient missing from the import is an error.
+splits:
+  import_from: null
+  allow_uncovered: false
+# Refuse to clobber an existing DB (checked up-front, before any slow work). Set true
+# to remove-and-rebuild.
+overwrite: false
+# Auto-generate the dataset analysis (summary.md + figures) after creation, into
+# <studies_dir>/<study>/<cohort>_analysis/. Set false to skip; rebuild the DB to regenerate.
+analyze: true

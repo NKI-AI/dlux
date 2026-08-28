@@ -1,0 +1,16 @@
+# @package paths
+# Cohort INPUT roots for the example, as STRUCTURE only. The machine-specific base is the DLUX_EXAMPLE_DATA
+# env var: where you gdc-client-downloaded the slides. It is an env var, not a config value, because the
+# download, sheet, and mask commands take the same path as a shell argument, so one export drives both
+# those and Hydra. Picked up via `- optional project/paths: default` when DLUX_PROJECT points here. The
+# `# @package paths` line is load-bearing.
+#
+# gdc-client downloads into $DLUX_EXAMPLE_DATA/<center>/images (one dir per file UUID); generate_masks
+# writes into $DLUX_EXAMPLE_DATA/<center>/masks.
+cohorts:
+  tcga_brca_coad_christiana:
+    image_dir: ${oc.env:DLUX_EXAMPLE_DATA}/christiana/images
+    mask_dir: ${oc.env:DLUX_EXAMPLE_DATA}/christiana/masks
+  tcga_brca_coad_mskcc:
+    image_dir: ${oc.env:DLUX_EXAMPLE_DATA}/mskcc/images
+    mask_dir: ${oc.env:DLUX_EXAMPLE_DATA}/mskcc/masks

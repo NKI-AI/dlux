@@ -1,0 +1,15 @@
+# Callbacks for a resplit trial. Same checkpointing as `default` — the bin still selects the
+# best-by-validate/loss weights to score — but no LearningRateMonitor and no progress bar.
+#
+# The LR monitor is not merely unwanted, it is incompatible: it raises without a logger, and a resplit
+# trial runs with logger=False on purpose. R x arms x reps runs would otherwise bury a study's real
+# experiments in mlflow, and nobody inspects an individual trial's LR curve.
+model_checkpoint:
+  _target_: lightning.pytorch.callbacks.ModelCheckpoint
+  dirpath: ${hydra:runtime.output_dir}/checkpoints
+  filename: "epoch_{epoch:03d}"
+  monitor: "validate/loss"
+  mode: "min"
+  save_top_k: 1
+  save_last: false # the trial is scored from the best checkpoint and the dir is disposable
+  auto_insert_metric_name: false

@@ -1,0 +1,8 @@
+# @package feature_extractor
+# UNI2-h foundation model (frozen). Normalisation and feature dim are read from the .pack; model_name
+# names the feature cache. Produce the .pack (downloads gated weights) with:
+#   python -m ahcore.tools.fomo_pack \
+#     --output-dir <models_dir> --models mahmoodlab-uni2-h --use-hf-login
+_target_: ahcore.feature_extractors.from_pack.PackFeatureExtractor
+pack_path: ${paths.models_dir}/mahmoodlab-uni2-h.pack
+model_name: uni2

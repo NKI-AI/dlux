@@ -1,0 +1,20 @@
+_target_: ahcore.mm_lit_module.MultiModalLightningModule
+model:
+  _target_: ahcore.models.classifiers.ab_mil.ABMIL
+  input_key: tile_features # = the task's input name
+  feature_dim: null # set by the train/eval bin from the .pack (like num_classes)
+  num_classes: 1 # overridden per-endpoint by the train bin (task.num_classes)
+  embed_mlp_hidden: []
+  embed_mlp_dropout: []
+  attention_dim: 256
+  attention_top_k: null
+  classifier_hidden: [] # linear head by default; a hidden layer (e.g. [128]) is an opt-in experiment
+  classifier_dropout: []
+  classifier_activation:
+    _target_: torch.nn.GELU
+optimizer:
+  _target_: torch.optim.AdamW
+  _partial_: true
+  lr: 5.0e-5
+  weight_decay: 0.0
+  betas: [0.9, 0.999]

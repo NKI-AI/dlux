@@ -1,0 +1,8 @@
+# @package tiling
+# 0.5 µm/px, 224² tiles. ~16x the tiles/slide of 2.0 µm/px, so extraction is materially slower and
+# the cache is larger.
+mpp: 0.5
+tile_size: [224, 224]
+tile_overlap: [0, 0]
+mask_threshold: 0.9
+tiling_mode: overflow

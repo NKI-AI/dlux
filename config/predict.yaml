@@ -1,0 +1,34 @@
+# @package _global_
+defaults:
+  - study: ???
+  - cohort: ???
+  - tiling: uni2_2mpp
+  - augmentations/tile_features: default
+  - paths: default
+  - hydra: default
+  - _self_
+  - optional local/paths: default
+  - optional project/paths: default
+  - optional local/misc: default
+task_name: predict
+# The development sweep's experiment_name — where best.ckpt live (runs/<study>/<experiment>/<dev_cohort>/).
+experiment_name: ???
+hydra:
+  # A consumer project supplies its own `catalog/` (cohorts, studies, experiments) and `config/`
+  # (custom tasks/models + its cohort paths). Both are search-path roots. Paths are relative to the
+  # process working directory (the repo root); set
+  # DLUX_PROJECT to a consumer project root (it supplies catalog/ and config/).
+  searchpath:
+    - file://${oc.env:DLUX_PROJECT,.}/catalog
+    - file://${oc.env:DLUX_PROJECT,.}/config
+  run:
+    dir: ${paths.log_dir}/predict/${experiment_name}/${now:%Y-%m-%d}_${now:%H-%M-%S-%f}
+# OPTIONAL narrowing: null/[] (default) predicts every endpoint the dev sweep trained that this cohort
+# declares; `only_fields=[recurrence]` predicts just that one. Selects among discovered runs — NOT a
+# target declaration.
+only_fields: null
+datamodule:
+  batch_size: 16
+  eval_batch_size: 1
+  num_workers: 0
+  min_tiles: 1 # drop slides with < this many cached tiles at the grid (1 = exclude empty/insufficient)

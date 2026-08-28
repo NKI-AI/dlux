@@ -1,0 +1,24 @@
+# @package _global_
+defaults:
+  - study: ???
+  - cohort: ???
+  - paths: default
+  - hydra: default
+  - _self_
+  - optional local/paths: default
+  - optional project/paths: default
+  - optional local/misc: default
+task_name: aggregate
+experiment_name: ??? # reads ${paths.studies_dir}/<study>/runs/<experiment_name>/<cohort>
+hydra:
+  # A consumer project supplies its own `catalog/` (cohorts, studies, experiments) and `config/`
+  # (custom tasks/models + its cohort paths). Both are search-path roots. Paths are relative to the
+  # process working directory (the repo root); set
+  # DLUX_PROJECT to a consumer project root (it supplies catalog/ and config/).
+  searchpath:
+    - file://${oc.env:DLUX_PROJECT,.}/catalog
+    - file://${oc.env:DLUX_PROJECT,.}/config
+  run:
+    dir: ${paths.log_dir}/aggregate/${experiment_name}/${now:%Y-%m-%d}_${now:%H-%M-%S-%f}
+strict: true # refuse to aggregate a partial sweep; strict=false to aggregate whatever exists
+random_experiment: null # expression: a random-baseline experiment_name -> SEQUOIA conservative gene count

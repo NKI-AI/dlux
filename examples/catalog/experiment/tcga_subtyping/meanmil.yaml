@@ -1,0 +1,12 @@
+# @package _global_
+# The baseline subtyping recipe with mean pooling instead of attention. Only `lit_module` differs,
+# so an arm-vs-baseline comparison isolates what the attention branch contributes.
+defaults:
+  - override /task: wsi_classification
+  - override /lit_module: mean_mil
+experiment_name: meanmil
+task_name: wsi_classification
+datamodule:
+  batch_size: 4
+trainer:
+  max_epochs: 25

@@ -1,0 +1,61 @@
+# @package _global_
+defaults:
+  # Both REQUIRED, and cross-checked at startup: the cohort must be one the study declares. No default
+  # pair, because any default is only ever right for one study — matching aggregate/evaluate_external.
+  - study: ???
+  - cohort: ???
+  - tiling: uni2_2mpp
+  - feature_extractor: uni2_tile
+  - task: wsi_classification
+  - lit_module: ab_mil
+  - augmentations/tile_features: default
+  - callbacks: resplit
+  - paths: default
+  - hydra: default
+  - _self_
+  - experiment: ??? # REQUIRED, study-scoped: experiment=<study>/<name> (bundles the recipe + experiment_name); after _self_ so it wins
+  - optional local/paths: default
+  - optional project/paths: default
+  - optional local/misc: default
+task_name: wsi_classification
+# experiment_name is set by the chosen experiment config (catalog/experiment/…); do not set it here.
+
+hydra:
+  # A consumer project supplies its own `catalog/` (cohorts, studies, experiments) and `config/`
+  # (custom tasks/models + its cohort paths). Both are search-path roots, relative to the process
+  # working directory (the repo root); set DLUX_PROJECT to a consumer project root.
+  searchpath:
+    - file://${oc.env:DLUX_PROJECT,.}/catalog
+    - file://${oc.env:DLUX_PROJECT,.}/config
+  run:
+    # Namespaced by resplit/experiment/seed BEFORE the timestamp so concurrent trials of one comparison
+    # (a slurm array) can never resolve to the same dir; %f guards reruns within the same second.
+    dir: ${paths.log_dir}/resplit/${resplit_name}/${experiment_name}/s${seed}_r${rep}/${now:%Y-%m-%d}_${now:%H-%M-%S-%f}
+datamodule:
+  batch_size: 16
+  eval_batch_size: 1
+  num_workers: 0 # main-process loading, robust everywhere; raise it (or use ${dlux.auto_workers:}) for parallel loading on a big machine
+  min_tiles: 1 # drop slides with < this many cached tiles at the grid (1 = exclude empty/insufficient)
+trainer:
+  max_epochs: 40
+  accelerator: auto
+  devices: 1
+  log_every_n_steps: 10
+  num_sanity_val_steps: 0 # skip Lightning's pre-flight val (a meaningless 2-sample metric compute)
+# -- resplit identity (see dlux_notes/COMPARE_SPEC.md 6b) ---------------------------------------
+# Names the comparison these trials belong to; all arms of one comparison share it, and it is the
+# directory their rows land in.
+resplit_name: ???
+# Which metric each trial is scored on, among the endpoint's metrics (null = the endpoint default).
+# Set once for the whole sweep; compare_resplits reads it back from the rows, so it can never mislabel.
+# Same options as compare's `metric:` (e.g. metric=qwk for an ordinal multiclass endpoint).
+metric: null
+# Draws the split. Every arm at the same seed sees a byte-identical partition, which is what makes
+# the comparison paired without any coordination between array tasks.
+seed: ???
+# Replicate index. Varies TRAINING randomness only, never the split — rep 1 vs rep 0 of one arm IS
+# the measured noise floor.
+rep: 0
+# fit / validate / test. Mirrors what 5x5 nested CV effectively gives (0.8*0.8 / 0.8*0.2 / 0.2), so a
+# trial trains on the same amount of data as the study it is being compared against.
+ratios: [0.64, 0.16, 0.20]

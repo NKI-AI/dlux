@@ -1,0 +1,10 @@
+# Phikon (owkin/phikon) frozen tile encoder, loaded from a self-describing .pack. Public + ungated (no
+# HuggingFace login). NON-COMMERCIAL license (Owkin) — for commercial use select a permissive encoder
+# instead (this is a one-line `feature_extractor=` override; the registry ships `vit-huge`).
+# Bake the .pack once, into your models_dir:
+#     pip install ahcore[tracing]
+#     python -m ahcore.tools.fomo_pack --models owkin-phikon --output-dir <models_dir>
+# feature_dim 768 (ViT-B), 224² tiles; normalisation + dim are read from the .pack.
+_target_: ahcore.feature_extractors.from_pack.PackFeatureExtractor
+pack_path: ${paths.models_dir}/owkin-phikon.pack
+model_name: phikon

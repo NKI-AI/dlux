@@ -1,0 +1,14 @@
+# @package _global_
+# The baseline subtyping recipe with the learning rate starved to 1e-7. The head barely moves from its
+# random initialization over the 25 epochs, so the arm stays near chance. Only the learning rate differs.
+defaults:
+  - override /task: wsi_classification
+experiment_name: lr_starved
+task_name: wsi_classification
+datamodule:
+  batch_size: 4
+trainer:
+  max_epochs: 25
+lit_module:
+  optimizer:
+    lr: 1.0e-7

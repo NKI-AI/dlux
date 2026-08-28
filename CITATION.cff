@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: dlux
+abstract: A standalone, application-agnostic pipeline for whole-slide-image and multimodal classification.
+type: software
+authors:
+  - given-names: Joren
+    family-names: Brunekreef
+    affiliation: The Netherlands Cancer Institute
+    email: j.brunekreef@nki.nl
+  - name: "AI for Oncology, The Netherlands Cancer Institute"
+version: 0.1.0
+license: Apache-2.0
+repository-code: "https://github.com/NKI-AI/dlux"
+url: "https://github.com/NKI-AI/dlux"
+keywords:
+  - computational pathology
+  - whole-slide imaging
+  - multiple-instance learning
+  - multimodal

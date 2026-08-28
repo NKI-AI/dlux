@@ -1,0 +1,24 @@
+_target_: ahcore.mm_lit_module.MultiModalLightningModule
+# RNA-ONLY: a ConcatFusion with a single RNA branch (no tile branch). Pairs with task=wsi_rna_fusion,
+# which still hands over {tiles, rna}; ConcatFusion only reads the branch keys it has, so the tiles are
+# ignored. The unimodal RNA comparator for the fusion experiment. Dims resolved by the train bin
+# (num_classes from the task, branches.bulk_rna.input_dim = task.n_genes).
+model:
+  _target_: ahcore.models.fusion.fusion_mil.ConcatFusion
+  num_classes: 1 # overridden per-endpoint by the train bin
+  classifier_hidden: []
+  classifier_dropout: []
+  classifier_activation:
+    _target_: torch.nn.GELU
+  branches:
+    bulk_rna:
+      _target_: ahcore.models.encoders.mlp_encoder.MLPEncoder
+      input_dim: 1 # overridden by the train bin (task.n_genes)
+      output_dim: 256
+      hidden: [512]
+optimizer:
+  _target_: torch.optim.AdamW
+  _partial_: true
+  lr: 5.0e-5
+  weight_decay: 0.0
+  betas: [0.9, 0.999]

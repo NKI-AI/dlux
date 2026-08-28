@@ -1,0 +1,9 @@
+# @package tiling
+# Tile geometry = the feature-cache coordinate (shared by extraction, training,
+# inference). Repo default: 2.0 µm/px, 224² tiles. Fit-time tile sampling lives in
+# augmentations, not here.
+mpp: 2.0
+tile_size: [224, 224]
+tile_overlap: [0, 0]
+mask_threshold: 0.9
+tiling_mode: overflow

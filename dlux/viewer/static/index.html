@@ -1,0 +1,1298 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>dlux — slide viewer</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/ol@v10.3.1/ol.css"
+    />
+    <script src="https://cdn.jsdelivr.net/npm/ol@v10.3.1/dist/ol.js"></script>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        height: 100vh;
+        display: flex;
+        font-family: ui-sans-serif, system-ui, sans-serif;
+        background: #111827;
+        color: #e5e7eb;
+      }
+      #sidebar {
+        width: 300px;
+        flex: none;
+        padding: 16px;
+        overflow-y: auto;
+        background: #1f2937;
+        border-right: 1px solid #374151;
+      }
+      #sidebar h1 {
+        font-size: 15px;
+        margin: 0 0 4px;
+      }
+      #sidebar .sub {
+        font-size: 12px;
+        color: #9ca3af;
+        margin-bottom: 16px;
+        word-break: break-all;
+      }
+      a {
+        color: #60a5fa;
+        text-decoration: none;
+        font-size: 13px;
+      }
+      a:hover {
+        text-decoration: underline;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12px;
+        margin-top: 12px;
+      }
+      td {
+        padding: 4px 0;
+        border-bottom: 1px solid #374151;
+      }
+      td:first-child {
+        color: #9ca3af;
+      }
+      td:last-child {
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+      label {
+        display: block;
+        font-size: 12px;
+        color: #9ca3af;
+        margin: 16px 0 4px;
+      }
+      #mask-controls input[type="range"],
+      #attn-controls input[type="range"] {
+        width: 100%;
+        margin-top: 6px;
+      }
+      #mask-controls label,
+      #attn-controls label {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      #mask-controls input[type="checkbox"],
+      #attn-controls input[type="checkbox"] {
+        margin: 0;
+      }
+      select {
+        width: 100%;
+        padding: 6px;
+        background: #111827;
+        color: #e5e7eb;
+        border: 1px solid #374151;
+        border-radius: 4px;
+        font-size: 13px;
+      }
+      #map {
+        flex: 1;
+        background: #0b0f19;
+      }
+      #error {
+        padding: 24px;
+        color: #f87171;
+        font-size: 14px;
+      }
+      #nav {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 14px 0 4px;
+      }
+      #nav button {
+        flex: 1;
+        padding: 6px 8px;
+        font-size: 13px;
+        cursor: pointer;
+        background: #111827;
+        color: #e5e7eb;
+        border: 1px solid #374151;
+        border-radius: 4px;
+      }
+      #nav button:hover:not(:disabled) {
+        background: #374151;
+      }
+      #nav button:disabled {
+        opacity: 0.35;
+        cursor: default;
+      }
+      #position {
+        font-size: 12px;
+        color: #9ca3af;
+        text-align: center;
+      }
+      #run-panel {
+        margin-top: 20px;
+        padding-top: 14px;
+        border-top: 1px solid #374151;
+      }
+      .panel-title {
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #6b7280;
+        margin-bottom: 4px;
+      }
+      #pred-line {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 14px;
+      }
+      #pred-value {
+        font-weight: 600;
+        color: #e5e7eb;
+      }
+      #pred-verdict {
+        font-size: 11px;
+        padding: 2px 7px;
+        border-radius: 10px;
+        font-weight: 600;
+      }
+      .cls {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12px;
+        color: #9ca3af;
+        margin-top: 3px;
+      }
+      .cls-name {
+        flex: 0 0 88px;
+      }
+      .cls-bar {
+        flex: 1;
+        height: 6px;
+        background: #111827;
+        border-radius: 3px;
+        overflow: hidden;
+      }
+      .cls-bar i {
+        display: block;
+        height: 100%;
+        background: #4b5563;
+      }
+      .cls-val {
+        flex: 0 0 44px;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+      .cls-top {
+        color: #e5e7eb;
+      }
+      .cls-top .cls-bar i {
+        background: #60a5fa;
+      }
+      #attn-dist {
+        width: 100%;
+        height: 66px;
+        margin-top: 10px;
+        display: block;
+        background: #111827;
+        border: 1px solid #374151;
+        border-radius: 3px;
+      }
+      .model-note {
+        font-size: 11px;
+        color: #6b7280;
+        margin-top: 2px;
+      }
+      .axis {
+        position: relative;
+        height: 10px;
+        margin-top: 4px;
+        border-radius: 3px;
+        background: #111827;
+        border: 1px solid #374151;
+      }
+      .tick {
+        position: absolute;
+        top: -3px;
+        width: 2px;
+        height: 14px;
+        margin-left: -1px;
+      }
+      .tick-pred {
+        background: #60a5fa;
+      }
+      .tick-true {
+        background: #6ee7b7;
+        width: 3px;
+      }
+      .cls-true .cls-name {
+        text-decoration: underline;
+        text-underline-offset: 3px;
+        text-decoration-color: #6ee7b7;
+        text-decoration-thickness: 2px;
+      }
+      .verdict-ok {
+        background: #064e3b;
+        color: #6ee7b7;
+      }
+      .verdict-bad {
+        background: #7f1d1d;
+        color: #fca5a5;
+      }
+      #attn-ramp {
+        height: 10px;
+        border-radius: 2px;
+        border: 1px solid #374151;
+      }
+      .surv-plot {
+        width: 100%;
+        height: 110px;
+        background: #111827;
+        border: 1px solid #374151;
+        border-radius: 3px;
+        display: block;
+      }
+      .surv-step {
+        fill: none;
+        stroke: #60a5fa;
+        stroke-width: 2;
+      }
+      .surv-ref {
+        fill: none;
+        stroke: #6b7280;
+        stroke-width: 1.5;
+        stroke-dasharray: 4 3;
+      }
+      .surv-grid {
+        stroke: #374151;
+        stroke-width: 1;
+      }
+      .surv-obs {
+        stroke: #6ee7b7;
+        stroke-width: 2;
+      }
+      .surv-txt {
+        fill: #6b7280;
+        font-size: 9px;
+      }
+      .ramp-ends {
+        display: flex;
+        justify-content: space-between;
+        font-size: 11px;
+        color: #9ca3af;
+        margin-top: 3px;
+        font-variant-numeric: tabular-nums;
+      }
+      .key {
+        margin-left: auto;
+        font-size: 10px;
+        color: #6b7280;
+        border: 1px solid #374151;
+        border-radius: 3px;
+        padding: 0 4px;
+        font-family: ui-monospace, monospace;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="sidebar">
+      <a href="/">&larr; all slides</a>
+      <h1 id="slide-name">loading…</h1>
+      <div class="sub" id="slide-patient"></div>
+      <div id="nav">
+        <button id="prev" title="previous slide (←)">&larr; prev</button>
+        <button id="next" title="next slide (→)">next &rarr;</button>
+      </div>
+      <div id="position"></div>
+      <table>
+        <tr>
+          <td>format</td>
+          <td id="i-format">-</td>
+        </tr>
+        <tr>
+          <td>dimensions</td>
+          <td id="i-dims">-</td>
+        </tr>
+        <tr>
+          <td>mpp</td>
+          <td id="i-mpp">-</td>
+        </tr>
+        <tr>
+          <td>levels</td>
+          <td id="i-levels">-</td>
+        </tr>
+        <tr>
+          <td>zoom range</td>
+          <td id="i-zoom">-</td>
+        </tr>
+        <tr>
+          <td>tile size</td>
+          <td id="i-tile">-</td>
+        </tr>
+        <tr>
+          <td>mask</td>
+          <td id="i-mask">-</td>
+        </tr>
+        <tr id="truth-row" style="display: none">
+          <td>label</td>
+          <td id="i-truth">-</td>
+        </tr>
+      </table>
+      <div id="image-switcher" style="display: none">
+        <label for="image-select">image</label>
+        <select id="image-select"></select>
+      </div>
+      <div id="mask-controls" style="display: none">
+        <label
+          ><input type="checkbox" id="mask-toggle" checked /> tissue mask
+          overlay <span class="key">M</span></label
+        >
+        <div id="mask-detail">
+          <input
+            type="range"
+            id="mask-opacity"
+            min="0"
+            max="1"
+            step="0.05"
+            value="0.35"
+          />
+        </div>
+      </div>
+      <div
+        id="mask-absent"
+        class="sub"
+        style="display: none; margin-top: 16px"
+      ></div>
+
+      <div id="run-panel" style="display: none">
+        <div class="panel-title">model</div>
+        <div class="sub" id="run-label" style="margin: 0 0 2px"></div>
+        <div class="model-note" id="run-stats" style="margin: 0 0 10px"></div>
+        <div id="pred-line">
+          <span id="pred-value">-</span><span id="pred-verdict"></span>
+        </div>
+        <div id="pred-detail" style="margin: 8px 0 0"></div>
+      </div>
+
+      <div id="attn-controls" style="display: none">
+        <label
+          ><input type="checkbox" id="attn-toggle" /> attention overlay
+          <span class="key">A</span></label
+        >
+        <div id="attn-detail">
+          <input
+            type="range"
+            id="attn-opacity"
+            min="0"
+            max="1"
+            step="0.05"
+            value="0.6"
+          />
+          <label
+            ><input type="checkbox" id="attn-topk-on" /> limit to top-k tiles
+            <span class="key">T</span></label
+          >
+          <div id="attn-topk-row" style="display: none">
+            <label for="attn-topk"
+              >k = <span id="attn-k-label">100</span></label
+            >
+            <input
+              type="range"
+              id="attn-topk"
+              min="1"
+              max="500"
+              step="1"
+              value="100"
+            />
+          </div>
+          <label for="attn-scale">colour scale</label>
+          <select id="attn-scale">
+            <option value="value">by weight</option>
+            <option value="rank">by rank</option>
+          </select>
+          <svg
+            id="attn-dist"
+            viewBox="0 0 260 66"
+            preserveAspectRatio="none"
+          ></svg>
+          <div class="sub" id="attn-retained" style="margin: 2px 0 0"></div>
+          <div id="attn-legend" style="margin-top: 8px">
+            <div id="attn-ramp"></div>
+            <div class="ramp-ends">
+              <span id="attn-lo"></span><span id="attn-hi"></span>
+            </div>
+          </div>
+          <div class="sub" id="attn-label" style="margin: 6px 0 0"></div>
+        </div>
+      </div>
+    </div>
+    <div id="map"></div>
+
+    <script>
+      const TILE_FORMAT = "jpg"; // slide tiles; mask tiles are PNG, which carries alpha
+
+      let map = null;
+      let maskLayer = null;
+      let attnLayer = null;
+      let attnFeatures = null;
+      let slideInfo = null;
+      let currentImageIndex = 0;
+
+      const slideParam = new URLSearchParams(window.location.search).get(
+        "slide"
+      );
+      // Which subset prev/next walks, inherited from the browser list's filter via the URL and carried
+      // across navigation, so stepping stays inside the set that was filtered to.
+      const scopeParam =
+        new URLSearchParams(window.location.search).get("scope") || "all";
+
+      function withSlide(url) {
+        const sep = url.includes("?") ? "&" : "?";
+        return url + sep + "slide=" + encodeURIComponent(slideParam);
+      }
+
+      function currentImage() {
+        return slideInfo.images[currentImageIndex];
+      }
+
+      // Coordinate system: image pixels with y pointing down — the extent's top edge is y=0 and its
+      // bottom edge is y=-height, tile-grid origin at the top-left so XYZ rows increase downward.
+      // One zoom level per native pyramid level; `resolutions` are the slide's own downsamples (not
+      // necessarily powers of two), so tiles are native reads and OpenLayers scales between them.
+      function buildLayer(image) {
+        const [width, height] = image.dimensions;
+        const extent = [0, -height, width, 0];
+        const resolutions = image.resolutions.slice();
+
+        const projOpts = {
+          code: "dlux-pixels",
+          units: "pixels",
+          extent: extent,
+        };
+        if (image.mpp) {
+          projOpts.metersPerUnit = image.mpp[0] * 1e-6; // 1 unit = 1 level-0 px = mpp microns
+        }
+        const projection = new ol.proj.Projection(projOpts);
+
+        const tileGrid = new ol.tilegrid.TileGrid({
+          extent: extent,
+          origin: [0, 0],
+          resolutions: resolutions,
+          tileSize: image.tile_size,
+        });
+
+        const source = new ol.source.XYZ({
+          projection: projection,
+          tileGrid: tileGrid,
+          wrapX: false,
+          tileUrlFunction: function (tileCoord) {
+            if (!tileCoord) return undefined;
+            const [z, x, y] = tileCoord;
+            if (x < 0 || y < 0) return undefined;
+            return withSlide(
+              `/tiles/${image.index}/${z}/${x}/${y}.${TILE_FORMAT}`
+            );
+          },
+        });
+
+        return {
+          layer: new ol.layer.Tile({ source }),
+          projection,
+          resolutions,
+          extent,
+        };
+      }
+
+      // The server resamples the mask onto the slide's grid, so this reuses the slide's resolutions,
+      // origin and zoom range. `interpolate: false` keeps the binary mask crisp when upscaled.
+      function buildMaskLayer(image, projection, extent) {
+        const tileGrid = new ol.tilegrid.TileGrid({
+          extent: extent,
+          origin: [0, 0],
+          resolutions: image.resolutions.slice(),
+          tileSize: image.tile_size,
+        });
+        const source = new ol.source.XYZ({
+          projection: projection,
+          tileGrid: tileGrid,
+          wrapX: false,
+          interpolate: false,
+          tileUrlFunction: function (tileCoord) {
+            if (!tileCoord) return undefined;
+            const [z, x, y] = tileCoord;
+            if (x < 0 || y < 0) return undefined;
+            return withSlide(`/mask/${z}/${x}/${y}.png`);
+          },
+        });
+        return new ol.layer.Tile({
+          source,
+          opacity: maskOpacity(),
+          visible: maskVisible(),
+        });
+      }
+
+      function attnOpacity() {
+        return parseFloat(document.getElementById("attn-opacity").value);
+      }
+
+      function attnVisible() {
+        return document.getElementById("attn-toggle").checked;
+      }
+
+      // Mirrors GatedAttention: keep the k highest logits, renormalise over them, keep everything
+      // when the slide has k tiles or fewer.
+      function attnTopK() {
+        if (!document.getElementById("attn-topk-on").checked) return null;
+        const k = parseInt(document.getElementById("attn-topk").value, 10);
+        return !attnSorted || k >= attnSorted.length ? null : k;
+      }
+
+      // Weight below which tiles are dropped for the current k.
+      function attnCutoff() {
+        const k = attnTopK();
+        return k === null ? -Infinity : attnSorted[attnSorted.length - k - 1];
+      }
+
+      // Renormalising the kept weights is what the model does; it scales them all equally, so it
+      // changes the reported numbers, not the rendering.
+      function attnKeptTotal() {
+        const cut = attnCutoff();
+        return attnSorted.reduce((a, v) => (v > cut ? a + v : a), 0);
+      }
+
+      function attnScaleMode() {
+        return document.getElementById("attn-scale").value;
+      }
+
+      // Attention arrives as one JSON payload per slide (a few thousand cells, ~30 KB) and is drawn
+      // as vector rectangles. Thresholding and colour are applied in the style function, so the
+      // controls never refetch anything.
+      const ATTENTION_RGB = [255, 214, 0];
+      let attnWeights = null; // softmax over the slide, aligned with the feature order
+      let attnSorted = null; // ascending copy, for percentile lookups
+
+      async function loadAttention() {
+        const resp = await fetch(withSlide("/attention.json"));
+        if (!resp.ok) return null;
+        const d = await resp.json();
+
+        // Softmax over the whole slide; the logits carry an arbitrary offset, so shift by the max.
+        const top = Math.max(...d.logit);
+        const exp = d.logit.map((l) => Math.exp(l - top));
+        const total = exp.reduce((a, b) => a + b, 0);
+        attnWeights = exp.map((e) => e / total);
+        attnSorted = [...attnWeights].sort((a, b) => a - b);
+
+        const features = [];
+        for (let i = 0; i < d.x.length; i++) {
+          const x0 = d.x[i];
+          const y0 = -d.y[i]; // map y grows upward; image y grows downward
+          const f = d.footprint;
+          const feature = new ol.Feature({
+            geometry: new ol.geom.Polygon([
+              [
+                [x0, y0],
+                [x0 + f, y0],
+                [x0 + f, y0 - f],
+                [x0, y0 - f],
+                [x0, y0],
+              ],
+            ]),
+          });
+          feature.set("w", attnWeights[i]);
+          features.push(feature);
+        }
+        return features;
+      }
+
+      // Styles are cached per alpha bucket: a new ol.style.Style per feature per frame is what makes
+      // vector layers slow.
+      const styleCache = new Map();
+      function alphaStyle(alpha) {
+        const bucket = Math.round(alpha * 32);
+        if (!styleCache.has(bucket)) {
+          const [r, g, b] = ATTENTION_RGB;
+          styleCache.set(
+            bucket,
+            new ol.style.Style({
+              fill: new ol.style.Fill({
+                color: `rgba(${r},${g},${b},${bucket / 32})`,
+              }),
+            })
+          );
+        }
+        return styleCache.get(bucket);
+      }
+
+      function attentionStyle(feature) {
+        const lo = attnCutoff();
+        const w = feature.get("w");
+        if (w <= lo) return null; // outside the top k
+        const hi = attnSorted[attnSorted.length - 1];
+        const floor = attnTopK() === null ? attnSorted[0] : lo;
+        const t =
+          attnScaleMode() === "rank"
+            ? rankFraction(w, lo)
+            : (w - floor) / (hi - floor || 1);
+        return alphaStyle(Math.min(1, Math.max(0, t)));
+      }
+
+      // Rank mode spreads alpha evenly over the visible tiles, so structure shows regardless of how
+      // peaked the endpoint is; value mode keeps magnitude honest.
+      function rankFraction(w, lo) {
+        let below = 0;
+        let visible = 0;
+        for (const v of attnSorted) {
+          if (v <= lo) continue;
+          visible++;
+          if (v < w) below++;
+        }
+        return visible > 1 ? below / (visible - 1) : 1;
+      }
+
+      function buildAttentionLayer(features) {
+        return new ol.layer.Vector({
+          source: new ol.source.Vector({ features }),
+          style: attentionStyle,
+          opacity: attnOpacity(),
+          visible: attnVisible(),
+        });
+      }
+
+      function maskOpacity() {
+        return parseFloat(document.getElementById("mask-opacity").value);
+      }
+
+      function maskVisible() {
+        return document.getElementById("mask-toggle").checked;
+      }
+
+      function createMap(image) {
+        const { layer, projection, resolutions, extent } = buildLayer(image);
+
+        if (map) {
+          map.setTarget(null);
+          map = null;
+        }
+
+        // The View gets extra coarse steps beyond the tile grid so the whole slide can be fitted;
+        // OpenLayers scales the coarsest tiles down for those, issuing no new requests.
+        const [width, height] = image.dimensions;
+        const viewResolutions = resolutions.slice();
+        const maxRes = Math.max(width, height) / 200;
+        let currentMax = viewResolutions[0];
+        while (currentMax < maxRes) {
+          currentMax *= 2;
+          viewResolutions.unshift(currentMax);
+        }
+
+        const controls = ol.control.defaults
+          .defaults()
+          .extend([new ol.control.FullScreen(), new ol.control.ZoomSlider()]);
+        if (image.mpp) {
+          controls.extend([
+            new ol.control.ScaleLine({ units: "metric", minWidth: 80 }),
+          ]);
+        }
+
+        const layers = [layer];
+        if (slideInfo.mask) {
+          maskLayer = buildMaskLayer(image, projection, extent);
+          layers.push(maskLayer);
+        }
+        if (attnFeatures) {
+          attnLayer = buildAttentionLayer(attnFeatures);
+          layers.push(attnLayer);
+        }
+
+        map = new ol.Map({
+          target: "map",
+          layers: layers,
+          view: new ol.View({
+            projection: projection,
+            resolutions: viewResolutions,
+            extent: extent,
+            constrainOnlyCenter: true,
+            showFullExtent: true,
+            enableRotation: false,
+          }),
+          controls: controls,
+        });
+        map.getView().fit(extent, { padding: [20, 20, 20, 20] });
+      }
+
+      function populateSidebar() {
+        const image = currentImage();
+        document.getElementById("slide-name").textContent = slideInfo.name;
+        document.getElementById("slide-patient").textContent =
+          slideInfo.patient_id ? `patient ${slideInfo.patient_id}` : "";
+        document.getElementById("i-format").textContent =
+          slideInfo.format || "-";
+        document.getElementById(
+          "i-dims"
+        ).textContent = `${image.dimensions[0]} × ${image.dimensions[1]}`;
+        document.getElementById("i-mpp").textContent = image.mpp
+          ? ((image.mpp[0] + image.mpp[1]) / 2).toFixed(4)
+          : "N/A";
+        document.getElementById("i-levels").textContent = image.level_count;
+        document.getElementById(
+          "i-zoom"
+        ).textContent = `${image.min_zoom} – ${image.max_zoom}`;
+        document.getElementById("i-tile").textContent = `${image.tile_size} px`;
+        const mask = slideInfo.mask;
+        document.getElementById("i-mask").textContent = mask
+          ? `${mask.dimensions[0]} × ${
+              mask.dimensions[1]
+            } (1/${mask.scale[0].toFixed(1)})`
+          : slideInfo.mask_declared
+          ? "missing"
+          : "none";
+      }
+
+      function selectImage(index) {
+        currentImageIndex = index;
+        populateSidebar();
+        createMap(currentImage());
+      }
+
+      function populateImageSwitcher() {
+        const switcher = document.getElementById("image-switcher");
+        const select = document.getElementById("image-select");
+        select.innerHTML = "";
+        if (slideInfo.images.length <= 1) return;
+        switcher.style.display = "block";
+        slideInfo.images.forEach((img) => {
+          const option = document.createElement("option");
+          option.value = img.index;
+          option.textContent = `${img.name || "image " + img.index} (${
+            img.dimensions[0]
+          }×${img.dimensions[1]})`;
+          select.appendChild(option);
+        });
+        select.value = currentImageIndex;
+        select.addEventListener("change", (e) =>
+          selectImage(parseInt(e.target.value, 10))
+        );
+      }
+
+      async function init() {
+        if (!slideParam) {
+          document.getElementById("map").innerHTML =
+            '<div id="error">No ?slide= given.</div>';
+          return;
+        }
+        const resp = await fetch(
+          withSlide("/info") + "&scope=" + encodeURIComponent(scopeParam)
+        );
+        if (!resp.ok) {
+          const detail = await resp.text();
+          document.getElementById("map").innerHTML =
+            '<div id="error">Failed to load slide info: ' + detail + "</div>";
+          return;
+        }
+        slideInfo = await resp.json();
+        currentImageIndex = slideInfo.primary_index || 0;
+        if (slideInfo.attention) {
+          attnFeatures = await loadAttention();
+        }
+        populateImageSwitcher();
+        applyLayerDefaults();
+        selectImage(currentImageIndex);
+
+        setupMaskControls();
+        setupAttentionControls();
+        showPrediction();
+        setupNavigation();
+      }
+
+      // With attention present it is the point of the view, so it starts on and the mask starts off.
+      function applyLayerDefaults() {
+        const hasAttention = Boolean(slideInfo.attention);
+        document.getElementById("attn-toggle").checked = hasAttention;
+        document.getElementById("mask-toggle").checked = !hasAttention;
+        syncControlVisibility();
+      }
+
+      // Controls for a hidden layer are dead UI, so each set follows its own toggle.
+      function syncControlVisibility() {
+        document.getElementById("mask-detail").style.display = maskVisible()
+          ? "block"
+          : "none";
+        document.getElementById("attn-detail").style.display = attnVisible()
+          ? "block"
+          : "none";
+      }
+
+      // The contract names each class by the source values that map to it, so the panel reads
+      // "grade 3" rather than "1". Falls back to the class index when no map is available.
+      function className(k) {
+        const p = slideInfo.prediction;
+        return (p.classes && p.classes[String(k)]) || `class ${k}`;
+      }
+
+      // Regression has no correct/wrong, so the prediction is placed on the cohort's label axis with
+      // the truth beside it, and the error is ranked against the model's own error distribution. The
+      // axis spans labels AND predictions so neither marker needs clamping.
+      function regressionDetail(p) {
+        const r = p.regression; // axis bounds only; run-level stats live in the header
+        const span = r.hi - r.lo || 1;
+        const at = (v) => (((v - r.lo) / span) * 100).toFixed(1);
+        const error = p.prob - p.label;
+        const beats =
+          r.beats_fraction === null ? null : Math.round(r.beats_fraction * 100);
+        return `
+          <div class="axis">
+            <i class="tick tick-true" style="left:${at(p.label)}%"></i>
+            <i class="tick tick-pred" style="left:${at(p.prob)}%"></i>
+          </div>
+          <div class="ramp-ends"><span>${r.lo.toFixed(
+            2
+          )}</span><span>${r.hi.toFixed(2)}</span></div>
+          <div class="cls" style="margin-top:6px">
+            <span class="cls-name">predicted</span><span class="cls-val">${p.prob.toFixed(
+              3
+            )}</span>
+          </div>
+          <div class="cls"><span class="cls-name">true</span><span class="cls-val">${p.label.toFixed(
+            3
+          )}</span></div>
+          <div class="cls"><span class="cls-name">error</span>
+            <span class="cls-val">${error >= 0 ? "+" : ""}${error.toFixed(
+          3
+        )}</span></div>
+          ${
+            beats === null
+              ? ""
+              : `<div class="sub" style="margin-top:6px">smaller error than ${beats}% of slides</div>`
+          }
+`;
+      }
+
+      // Survival has no correct/wrong and no error: the truth is a censored (time, event) pair, so a
+      // censored patient only says "alive at least this long". The panel therefore shows the predicted
+      // survival curve with the observed follow-up marked on the same time axis, and places the risk
+      // score in the cohort because its scale is arbitrary (risk = -sum_j S_j, no units).
+      // What actually happened to the patient. An event is an observed endpoint (death, progression —
+      // whichever the field is); censored means follow-up stopped with the patient still event-free, so
+      // it is a LOWER BOUND on their survival, not an outcome. One helper so the info table and the
+      // panel cannot word it differently.
+      function outcomeText(p) {
+        if (!Array.isArray(p.label)) return null;
+        const [time, event] = p.label;
+        return event === 1
+          ? `event at ${Math.round(time)}`
+          : `event-free at ${Math.round(time)}`;
+      }
+
+      function survivalDetail(p) {
+        const s = p.survival;
+        const time = p.label ? p.label[0] : null;
+        const event = p.label ? p.label[1] === 1 : null;
+        const W = 260,
+          H = 110,
+          L = 30,
+          R = 8,
+          T = 8,
+          B = 18;
+        // tMax depends only on run-level values, so the axis and the reference curve are identical on
+        // every slide of a run. The cohort's last KM time is the longest follow-up any patient has, so
+        // every observed-time marker lands inside the plot.
+        // An empty km_times is truthy, hence the length guard: `[].at(-1)` is undefined and NaN would
+        // propagate through every coordinate below.
+        const kmLast =
+          s.km_times && s.km_times.length
+            ? s.km_times[s.km_times.length - 1]
+            : 0;
+        const tMax = Math.max(s.edges[s.edges.length - 1] || 1, kmLast) * 1.05;
+        const x = (t) => L + (t / tMax) * (W - L - R);
+        const y = (v) => T + (1 - v) * (H - T - B);
+        // Step function: 1 until the first edge, then surv[j] from edge j onward.
+        let d = `M ${x(0)} ${y(1)}`;
+        s.edges.forEach((e, j) => {
+          d += ` L ${x(e)} ${y(j === 0 ? 1 : s.surv[j - 1])} L ${x(e)} ${y(
+            s.surv[j]
+          )}`;
+        });
+        d += ` L ${x(tMax)} ${y(s.surv[s.surv.length - 1])}`;
+        // Cohort KM behind it: without a reference the patient's curve is a number nobody can score,
+        // and with one it reads as "the model puts this patient above/below the population".
+        let ref = "";
+        if (s.km_times && s.km_times.length > 1) {
+          let rd = `M ${x(0)} ${y(1)}`;
+          s.km_times.forEach((t, i) => {
+            rd += ` L ${x(t)} ${y(i === 0 ? 1 : s.km_surv[i - 1])} L ${x(
+              t
+            )} ${y(s.km_surv[i])}`;
+          });
+          rd += ` L ${x(tMax)} ${y(s.km_surv[s.km_surv.length - 1])}`;
+          ref = `<path class="surv-ref" d="${rd}" />`;
+        }
+        const obs =
+          time === null
+            ? ""
+            : `<line class="surv-obs" x1="${x(time)}" y1="${T}" x2="${x(
+                time
+              )}" y2="${H - B}"
+                     ${event ? "" : 'stroke-dasharray="3 2"'} />`;
+        const riskier =
+          s.riskier_than === null || s.riskier_than === undefined
+            ? null
+            : Math.round(s.riskier_than * 100);
+        return `
+          <svg class="surv-plot" viewBox="0 0 ${W} ${H}">
+            <line class="surv-grid" x1="${L}" y1="${y(1)}" x2="${
+          W - R
+        }" y2="${y(1)}" />
+            <line class="surv-grid" x1="${L}" y1="${y(0)}" x2="${
+          W - R
+        }" y2="${y(0)}" />
+            <line class="surv-grid" x1="${L}" y1="${T}" x2="${L}" y2="${
+          H - B
+        }" />
+            <text class="surv-txt" x="2" y="${y(1) + 3}">1.0</text>
+            <text class="surv-txt" x="2" y="${y(0) + 3}">0.0</text>
+            <text class="surv-txt" x="${L}" y="${H - 5}">0</text>
+            <text class="surv-txt" x="${W - R}" y="${
+          H - 5
+        }" text-anchor="end">${Math.round(tMax)}</text>
+            ${ref}
+            ${obs}
+            <path class="surv-step" d="${d}" />
+          </svg>
+          <div class="model-note">blue predicted · grey cohort (n=${
+            s.n_patients
+          }) · green follow-up${event ? "" : " (censored)"}</div>
+          ${
+            time === null
+              ? ""
+              : `<div class="cls" style="margin-top:8px">
+                   <span class="cls-name" style="flex:0 0 120px">P(event-free ${Math.round(
+                     time
+                   )})</span>
+                   <span class="cls-val">${survAt(s, time).toFixed(
+                     3
+                   )}</span></div>`
+          }
+          ${
+            riskier === null
+              ? ""
+              : `<div class="cls"><span class="cls-name" style="flex:0 0 120px">risk percentile</span>
+                   <span class="cls-val">${riskier}</span></div>`
+          }
+`;
+      }
+
+      // The curve's step value at an arbitrary time: 1 before the first edge, surv[j] at or past edge j.
+      function survAt(s, t) {
+        let value = 1;
+        s.edges.forEach((e, j) => {
+          if (t >= e) value = s.surv[j];
+        });
+        return value;
+      }
+
+      // Shows the model's output as it comes out of the head: one sigmoid for binary, the whole
+      // softmax vector for multiclass. This is the fold's own prediction, not the ensemble.
+      function showPrediction() {
+        const p = slideInfo.prediction;
+        if (!p) return;
+        document.getElementById("run-panel").style.display = "block";
+        document.getElementById("run-label").textContent = slideInfo.attention
+          ? slideInfo.attention.label
+          : "";
+        // Run-level facts are the same on every slide, so they sit with the run label, not beside the
+        // per-slide values.
+        const stats = document.getElementById("run-stats");
+        const r = p.regression;
+        const att = slideInfo.attention;
+        const lines = [];
+        if (att && att.aggregated) {
+          lines.push(
+            `mean of ${att.inners.length} inner model${
+              att.inners.length === 1 ? "" : "s"
+            } ` + `(${att.inners.map((i) => "i" + i).join(", ")})`
+          );
+        }
+        if (r) {
+          lines.push(
+            `${r.n_slides} slides · r ${r.pearson_r.toFixed(
+              2
+            )} · median error ` +
+              `${r.median_abs_error.toFixed(3)} (${(
+                r.median_abs_error / r.label_sd
+              ).toFixed(2)}× label sd)`
+          );
+        }
+        if (p.survival && p.survival.n_slides) {
+          lines.push(
+            `${p.survival.n_patients} patients / ${p.survival.n_slides} slides · ` +
+              `${p.survival.n_events} events · median follow-up ${Math.round(
+                p.survival.median_follow_up
+              )}`
+          );
+        }
+        stats.innerHTML = lines.join("<br />");
+
+        const detail = document.getElementById("pred-detail");
+        let predicted = null;
+        if (Array.isArray(p.prob)) {
+          predicted = p.prob.indexOf(Math.max(...p.prob));
+          detail.innerHTML = p.prob
+            .map(
+              (v, k) => `<div class="cls${k === predicted ? " cls-top" : ""}${
+                k === Number(p.label) ? " cls-true" : ""
+              }">
+                   <span class="cls-name">${className(k)}</span>
+                   <span class="cls-bar"><i style="width:${(v * 100).toFixed(
+                     1
+                   )}%"></i></span>
+                   <span class="cls-val">${v.toFixed(3)}</span>
+                 </div>`
+            )
+            .join("");
+        } else if (p.endpoint_type === "binary") {
+          predicted = p.prob >= 0.5 ? 1 : 0;
+          detail.innerHTML = `<div class="cls cls-top">
+               <span class="cls-name">sigmoid</span>
+               <span class="cls-bar"><i style="width:${(p.prob * 100).toFixed(
+                 1
+               )}%"></i></span>
+               <span class="cls-val">${p.prob.toFixed(3)}</span>
+             </div>`;
+        } else if (p.survival) {
+          detail.innerHTML = survivalDetail(p);
+        } else if (p.regression) {
+          detail.innerHTML = regressionDetail(p);
+        } else {
+          detail.textContent = Number(p.prob).toFixed(3);
+        }
+
+        document.getElementById("pred-value").textContent =
+          predicted === null ? "" : className(predicted);
+
+        const verdict = document.getElementById("pred-verdict");
+        const hasLabel =
+          p.label !== null && p.label !== undefined && !Array.isArray(p.label);
+        if (predicted !== null && hasLabel) {
+          const correct = predicted === Number(p.label);
+          verdict.textContent = correct ? "correct" : "wrong";
+          verdict.className = correct ? "verdict-ok" : "verdict-bad";
+        } else {
+          verdict.textContent = "";
+          verdict.className = "";
+        }
+
+        // The coupled (time, event) label is an array, so it needs its own wording — but it belongs in
+        // the info table exactly like a class or a value does.
+        const outcome = outcomeText(p);
+        if (hasLabel || outcome) {
+          document.getElementById("i-truth").textContent =
+            outcome !== null
+              ? outcome
+              : Number.isInteger(p.label)
+              ? className(Number(p.label))
+              : Number(p.label).toFixed(3);
+          document.getElementById("truth-row").style.display = "table-row";
+        }
+      }
+
+      // Legend ends are the threshold and the slide maximum, in multiples of uniform attention.
+      // Weights are reported renormalised over the kept tiles, so they read as the share of attention
+      // the model would place there at this k. "x mean" is relative to uniform over those tiles.
+      function updateLegend() {
+        if (!attnSorted || !slideInfo.attention) return;
+        const n = attnSorted.length;
+        const k = attnTopK();
+        const kept = k === null ? n : k;
+        const cut = attnCutoff();
+        const total = attnKeptTotal();
+        const lo = ((k === null ? attnSorted[0] : cut) / total) * kept;
+        const hi = (attnSorted[n - 1] / total) * kept;
+        updateDistribution();
+        document.getElementById("attn-lo").textContent = `${lo.toFixed(
+          1
+        )}× mean`;
+        document.getElementById("attn-hi").textContent = `${hi.toFixed(1)}×`;
+        const rawK = parseInt(document.getElementById("attn-topk").value, 10);
+        document.getElementById("attn-k-label").textContent =
+          k === null && rawK >= n
+            ? `${rawK} — slide has only ${n}`
+            : `${rawK} of ${n}`;
+        const a = slideInfo.attention;
+        // Agreement is specific to attention; which models were averaged is not, so it lives in the
+        // model panel.
+        const agree =
+          a.consistency === null || a.consistency === undefined
+            ? ""
+            : `<br />attention agreement ${a.consistency.toFixed(
+                2
+              )} between models`;
+        document.getElementById("attn-label").innerHTML =
+          `top tile holds ${((attnSorted[n - 1] / total) * 100).toFixed(
+            1
+          )}% of attention` + agree;
+      }
+
+      // Cumulative share of attention against tile rank, log-x because the interesting range is the
+      // first few dozen tiles out of hundreds. The shaded part is what top-k discards.
+      function updateDistribution() {
+        const svg = document.getElementById("attn-dist");
+        if (!attnSorted || !attnSorted.length) return;
+        const desc = [...attnSorted].reverse();
+        const n = desc.length;
+        const W = 260;
+        const H = 66;
+        const lx = (rank) => (Math.log(rank) / Math.log(n)) * W;
+
+        let cum = 0;
+        const pts = [];
+        for (let i = 0; i < n; i++) {
+          cum += desc[i];
+          pts.push(
+            `${lx(i + 1).toFixed(1)},${(H - cum * (H - 2) - 1).toFixed(1)}`
+          );
+        }
+
+        const k = attnTopK();
+        const cutX = k === null ? W : lx(Math.min(k, n));
+        const retained =
+          k === null ? 1 : desc.slice(0, k).reduce((a, b) => a + b, 0);
+
+        svg.innerHTML =
+          `<rect x="${cutX}" y="0" width="${
+            W - cutX
+          }" height="${H}" fill="#7f1d1d" opacity="0.35"/>` +
+          `<polyline points="${pts.join(
+            " "
+          )}" fill="none" stroke="#fbbf24" stroke-width="1.5"/>` +
+          (k === null
+            ? ""
+            : `<line x1="${cutX}" y1="0" x2="${cutX}" y2="${H}" stroke="#f87171" stroke-width="1"/>`);
+
+        document.getElementById("attn-retained").textContent =
+          k === null
+            ? `${n} tiles · all attention kept`
+            : `k=${k} keeps ${(retained * 100).toFixed(
+                1
+              )}% of attention, drops ${n - Math.min(k, n)} tiles`;
+      }
+
+      function setupAttentionControls() {
+        if (!slideInfo.attention) return;
+        document.getElementById("attn-controls").style.display = "block";
+        const a = slideInfo.attention;
+        const [r, g, b] = ATTENTION_RGB;
+        // Alpha carries the weight, so the ramp is drawn over the page background to match.
+        document.getElementById(
+          "attn-ramp"
+        ).style.background = `linear-gradient(to right, rgba(${r},${g},${b},0) 0%, rgba(${r},${g},${b},1) 100%)`;
+        updateLegend();
+        document
+          .getElementById("attn-toggle")
+          .addEventListener("change", () => {
+            if (attnLayer) attnLayer.setVisible(attnVisible());
+            syncControlVisibility();
+          });
+        document
+          .getElementById("attn-opacity")
+          .addEventListener("input", () => {
+            if (attnLayer) attnLayer.setOpacity(attnOpacity());
+          });
+        document.getElementById("attn-topk").addEventListener("input", () => {
+          updateLegend();
+          if (attnLayer) attnLayer.changed();
+        });
+        document
+          .getElementById("attn-topk-on")
+          .addEventListener("change", (e) => {
+            document.getElementById("attn-topk-row").style.display = e.target
+              .checked
+              ? "block"
+              : "none";
+            updateLegend();
+            if (attnLayer) attnLayer.changed();
+          });
+        document.getElementById("attn-scale").addEventListener("change", () => {
+          if (attnLayer) attnLayer.changed();
+        });
+      }
+
+      // Masks are optional. A mask named in the sheet but absent on disk is surfaced; a cohort or
+      // slide with no mask declared at all just omits the controls.
+      function setupMaskControls() {
+        if (!slideInfo.mask) {
+          if (slideInfo.mask_declared) {
+            const note = document.getElementById("mask-absent");
+            note.style.display = "block";
+            note.textContent =
+              "mask declared in the sheet but not found on disk";
+          }
+          return;
+        }
+        document.getElementById("mask-controls").style.display = "block";
+        document
+          .getElementById("mask-toggle")
+          .addEventListener("change", () => {
+            if (maskLayer) maskLayer.setVisible(maskVisible());
+            syncControlVisibility();
+          });
+        document
+          .getElementById("mask-opacity")
+          .addEventListener("input", () => {
+            if (maskLayer) maskLayer.setOpacity(maskOpacity());
+          });
+      }
+
+      // Position and neighbours come from /info. Navigation is a full page load.
+      function setupNavigation() {
+        const go = (slideId) => {
+          if (!slideId) return;
+          const scope =
+            scopeParam === "all"
+              ? ""
+              : "&scope=" + encodeURIComponent(scopeParam);
+          window.location.search =
+            "?slide=" + encodeURIComponent(slideId) + scope;
+        };
+        const prev = document.getElementById("prev");
+        const next = document.getElementById("next");
+        prev.disabled = !slideInfo.prev_slide_id;
+        next.disabled = !slideInfo.next_slide_id;
+        prev.addEventListener("click", () => go(slideInfo.prev_slide_id));
+        next.addEventListener("click", () => go(slideInfo.next_slide_id));
+        document.getElementById("position").textContent = `slide ${
+          slideInfo.position + 1
+        } of ${slideInfo.total}`;
+
+        // Flipping a checkbox in code does not fire its change listeners, so the shortcuts click it —
+        // one path for keyboard and mouse. `offsetParent` is null while any ancestor is display:none,
+        // which is how a control for an absent overlay is hidden, so a shortcut cannot reach one.
+        const press = (id) => {
+          const box = document.getElementById(id);
+          if (box && box.offsetParent !== null) box.click();
+        };
+        document.addEventListener("keydown", (e) => {
+          if (e.target.tagName === "SELECT" || e.target.tagName === "INPUT")
+            return;
+          if (e.metaKey || e.ctrlKey || e.altKey) return; // leave browser and OS chords alone
+          if (e.key === "ArrowLeft") go(slideInfo.prev_slide_id);
+          if (e.key === "ArrowRight") go(slideInfo.next_slide_id);
+          if (e.key === "Escape") window.location.href = "/";
+          const key = e.key.toLowerCase();
+          if (key === "m") press("mask-toggle");
+          if (key === "a") press("attn-toggle");
+          if (key === "t") press("attn-topk-on");
+        });
+      }
+
+      init();
+    </script>
+  </body>
+</html>

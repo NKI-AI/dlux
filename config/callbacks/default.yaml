@@ -1,0 +1,19 @@
+# Minimal training callbacks (lightning built-ins). Checkpoints go to the DISPOSABLE hydra
+# run dir; the train bin copies the best one into the canonical runs dir via persist_run_artifacts.
+learning_rate_monitor:
+  _target_: lightning.pytorch.callbacks.LearningRateMonitor
+  logging_interval: epoch
+model_checkpoint:
+  _target_: lightning.pytorch.callbacks.ModelCheckpoint
+  dirpath: ${hydra:runtime.output_dir}/checkpoints
+  filename: "epoch_{epoch:03d}"
+  monitor: "validate/loss"
+  mode: "min"
+  save_top_k: 1 # keep only the best-by-validate/loss; the bin loads + tests THIS checkpoint
+  save_last: true
+  auto_insert_metric_name: false
+rich_progress_bar:
+  _target_: lightning.pytorch.callbacks.RichProgressBar
+log_metrics:
+  # Mirror epoch metrics into train.log; the rich progress bar above is console-only.
+  _target_: dlux.callbacks.LogMetrics

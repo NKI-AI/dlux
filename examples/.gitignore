@@ -1,0 +1,5 @@
+# Site-specific local config (real paths) — never committed, excluded from the public carve too.
+config/local/
+# Python caches.
+**/__pycache__/
+*.pyc

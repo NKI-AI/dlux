@@ -1,0 +1,12 @@
+# @package paths
+# TEMPLATE for a public clone — copy to config/local/paths/default.yaml (NOTE the paths/ subdir). It only
+# needs to exist so `- optional local/paths: default` fills the ??? in dlux's config/paths/default.yaml;
+# the output root itself comes from the DLUX_ROOT env var, so there is nothing to edit here.
+#
+#     cp local_paths.example.yaml config/local/paths/default.yaml
+#     export DLUX_ROOT=/ABSOLUTE/PATH/TO/your_dlux_outputs
+#
+# config/local/ never ships (the carve excludes it). The cohort DATA root is a separate env var,
+# DLUX_EXAMPLE_DATA (see config/project/paths). Cohorts, caches, runs, results, and the model store all
+# derive from root_dir, so DLUX_ROOT drives the whole output tree (the model store is $DLUX_ROOT/models).
+root_dir: ${oc.env:DLUX_ROOT}

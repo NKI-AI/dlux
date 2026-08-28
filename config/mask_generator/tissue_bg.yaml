@@ -1,0 +1,10 @@
+# @package mask_generator
+# Tissue/background segmenter — the public HuggingFace NKI-AI/tissue-bg-all-stains .pack (a TorchScript
+# model + embedded config). Run tile-by-tile to produce a pyramidal <stem>.mask.tiff per slide; the
+# resolution / tile size / normalisation come from the .pack, so nothing here needs to match a cohort.
+hf_repo_id: NKI-AI/tissue-bg-all-stains
+hf_filename: tissue_background_all_stains.pack
+pack_path: null # explicit local .pack; null -> download from HF (cached)
+device: auto # auto -> the GPU backend when available (torch.accelerator), else cpu
+thumbnail: false # set true to also write a <stem>.thumbnail.png QC overlay (mask over a low-res slide read)
+quiet_reader: true # silence fastslide's C++ corrupt-tile (DATA_LOSS) stderr chatter; set false to debug

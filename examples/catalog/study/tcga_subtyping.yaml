@@ -1,0 +1,16 @@
+# @package study
+# TCGA BRCA-vs-COAD subtyping example: Christiana Healthcare develops (nested CV), MSKCC externally
+# validates (all_test). A small, curated, public subset — the manifests pull ~30 patients/center, so the
+# split grid is smaller than a production study, which runs 5×5. Cancer type is an easy
+# target that even generic features separate, so it is a good first end-to-end run.
+name: tcga_subtyping
+cohorts:
+  tcga_brca_coad_christiana: development
+  tcga_brca_coad_mskcc: validation
+targets: [cancer_type]
+require_modalities: []
+splits:
+  n_outer: 3
+  n_inner: 2
+  per_label: true
+  random_state: 42

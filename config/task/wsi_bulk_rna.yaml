@@ -1,0 +1,17 @@
+# @package task
+# WSIBulkRNATask predicts a patient's full bulk RNA-seq gene VECTOR from one precomputed
+# slide-feature set (ABMIL, multi-output MSE). The task applies log1p + per-gene z-score (this fold's
+# train-split stats) internally — there is no normalize knob. `target` is the regression_vector field.
+# REQUIRED per run (no default); must match the field in split_version (e.g. target=expression with
+# split_version=expression_cv_o0_i0).
+_target_: dlux.tasks.wsi_bulk_rna.WSIBulkRNATask
+# The endpoint: a field of the cohort contract, which says what it means and where it lives.
+# `gene_panel` is a READ parameter of the target: `full` = every gene in the matrix; else a panel name
+# (cohorts/<cohort>/rnaseq/panels/<name>.csv) or a path. Panels are frozen, unsupervised gene subsets.
+target:
+  field: ???
+  gene_panel: full
+# The data streams this task reads. Names are the contract between the batch, this config and the
+# model's branch keys; add a `bulk_rna` entry here for a fusion arm.
+inputs:
+  tile_features: {modality: tile_features}

@@ -1,0 +1,15 @@
+# @package _global_
+# Baseline TCGA subtyping recipe: binary BRCA-vs-COAD (cancer_type) on the default ABMIL linear head,
+# 2.0mpp cache. Develop on tcga_brca_coad_christiana (nested CV), externally validate on
+# tcga_brca_coad_mskcc. Pair with study=tcga_subtyping, split_version=cancer_type_cv_o{k}_i{j},
+# task.target=cancer_type.
+defaults:
+  - override /task: wsi_classification
+experiment_name: baseline
+task_name: wsi_classification
+datamodule:
+  # This is a small curated subset: a fold's fit split is only ~10 patients, below the repo default
+  # batch_size (16), so tune it down for the example.
+  batch_size: 4
+trainer:
+  max_epochs: 25 # val-loss selection picks the checkpoint; val plateaus before this

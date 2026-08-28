@@ -1,0 +1,33 @@
+# @package _global_
+defaults:
+  # Both REQUIRED and cross-checked: the cohort must be one the study declares.
+  - study: ???
+  - cohort: ???
+  # The endpoint's objective decides the metric's display name; the task itself is not built here.
+  - task: wsi_classification
+  - paths: default
+  - hydra: default
+  - _self_
+  # REQUIRED, study-scoped: comparison=<study>/<name>. The SAME config `compare` uses — the arms and
+  # the reference are one question asked at two levels of rigour, so they are stated once.
+  - comparison: ???
+  - optional local/paths: default
+  - optional project/paths: default
+  - optional local/misc: default
+task_name: compare_resplits
+# Set by the chosen comparison config; do not set it here.
+comparison_name: ???
+arms: ???
+reference: ???
+# REQUIRED: names the sweep whose rows to read, matching RESPLIT_NAME in resplit_sweep.sh.
+resplit_name: ???
+hydra:
+  # A consumer project supplies its own `catalog/` (cohorts, studies, experiments) and `config/`
+  # (custom tasks/models + its cohort paths). Both are search-path roots. Repeated in every bin's
+  # PRIMARY config because hydra needs the search path to find config groups at all, so it cannot
+  # come from one (verified: moving it to `hydra/default.yaml` stops the project catalog resolving).
+  searchpath:
+    - file://${oc.env:DLUX_PROJECT,.}/catalog
+    - file://${oc.env:DLUX_PROJECT,.}/config
+  run:
+    dir: ${paths.log_dir}/compare_resplits/${resplit_name}/${now:%Y-%m-%d}_${now:%H-%M-%S-%f}

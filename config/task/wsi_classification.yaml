@@ -1,0 +1,23 @@
+# @package task
+# WSIClassificationTask predicts one patient endpoint from a single precomputed
+# slide-feature set (ABMIL). `target` is the contract field to predict; its type
+# (binary/multiclass) + value map come from the dataset contract.
+# REQUIRED per run (no project-wide default — the valid targets differ per cohort); must match the
+# field in split_version (e.g. target=er with split_version=er_cv_o0_i0).
+_target_: dlux.tasks.wsi_classification.WSIClassificationTask
+# The endpoint: a field of the cohort contract, which says what it means and where it lives.
+target:
+  field: ???
+# Regression only: `zscore` standardises the target using THIS fold's train-split μ/σ (leakage-clean),
+# de-standardised back to raw units on output. `none` = raw-scale MSE. Ignored for classification.
+target_normalize: none
+# Class weighting. `balanced` is inverse-frequency from THIS fold's fit split (leakage-clean);
+# a {"0": w0, "1": w1, ...} map sets the weights directly. Weights are relative — an overall scale
+# cancels in both the BCE ratio and the CE normalisation. Off by default: weighting improves the
+# minority operating point and decalibrates against the true prior.
+loss:
+  weight: none
+# The data streams this task reads. Names are the contract between the batch, this config and the
+# model's branch keys; add a `bulk_rna` entry here for a fusion arm.
+inputs:
+  tile_features: {modality: tile_features}

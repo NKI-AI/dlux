@@ -1,0 +1,7 @@
+# @package _global_
+# Three arms against the baseline reference: mean pooling (meanmil) and a learning-rate-starved arm
+# (lr_starved). `compare` reads the existing nested-CV sweep. `compare_resplits` reads a resplit sweep
+# and reports each arm's delta against the measured noise floor.
+comparison_name: robustness
+arms: [baseline, meanmil, lr_starved]
+reference: baseline

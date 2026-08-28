@@ -1,0 +1,30 @@
+# Browse a cohort's slides in the browser. Reads the cohort's sheets/slides.csv directly — no manifest
+# DB and no study, so it works before build_db (which is when mask QC is most useful).
+defaults:
+  - cohort: ???
+  - paths: default
+  - hydra: default
+  - _self_
+  - optional local/paths: default
+  - optional project/paths: default
+host: 127.0.0.1 # bind address; the port is reached over an SSH tunnel
+port: 8000
+tile_size: 256
+jpeg_quality: 90 # slide tiles are always JPEG; mask tiles are always PNG (they need alpha)
+only: null # optional list of slide ids (or bare filenames) to serve instead of the whole cohort
+# Optional: the trained model to inspect (its attention and its predictions). Set study+experiment+field
+# together to enable it; `inner` picks which inner replicate, and each slide's outer fold follows from
+# the fold that tested it.
+run:
+  study: null
+  experiment: null
+  field: null
+  inner: null # a single inner replicate, or null to average every replicate present
+hydra:
+  # A consumer project supplies its own `catalog/` (cohorts, studies, experiments) and `config/`
+  # (custom tasks/models + its cohort paths). Both are search-path roots. Paths are relative to the
+  # process working directory (the repo root); set
+  # DLUX_PROJECT to a consumer project root (it supplies catalog/ and config/).
+  searchpath:
+    - file://${oc.env:DLUX_PROJECT,.}/catalog
+    - file://${oc.env:DLUX_PROJECT,.}/config

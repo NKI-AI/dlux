@@ -1,0 +1,54 @@
+# @package _global_
+defaults:
+  # Both REQUIRED, and cross-checked at startup: the cohort must be one the study declares. No default
+  # pair, because any default is only ever right for one study — matching aggregate/evaluate_external.
+  - study: ???
+  - cohort: ???
+  - tiling: uni2_2mpp
+  - feature_extractor: uni2_tile
+  - task: wsi_classification
+  - lit_module: ab_mil
+  - augmentations/tile_features: default
+  - callbacks: default
+  - paths: default
+  - hydra: default
+  - _self_
+  - experiment: ??? # REQUIRED, study-scoped: experiment=<study>/<name> (bundles the recipe + experiment_name); after _self_ so it wins
+  - optional local/paths: default
+  - optional project/paths: default
+  - optional local/misc: default
+task_name: ${hydra:runtime.choices.task}
+# experiment_name is set by the chosen experiment config (catalog/experiment/…); do not set it here.
+# The fold to train — pass exactly ONE of these. `fold` is the flat nested-CV index, resolved against
+# the study's declared n_outer x n_inner grid (fold=7 with n_inner=5 -> outer 1, inner 2), so a sweep
+# passes its array index and nothing restates the grid. `split_version` names a stored split directly
+# and is the only way to reach the non-CV families (all_test_<field>).
+fold: null
+split_version: null
+hydra:
+  # A consumer project supplies its own `catalog/` (cohorts, studies, experiments) and `config/`
+  # (custom tasks/models + its cohort paths). Both are search-path roots. Paths are relative to the
+  # process working directory (the repo root); set
+  # DLUX_PROJECT to a consumer project root (it supplies catalog/ and config/).
+  searchpath:
+    - file://${oc.env:DLUX_PROJECT,.}/catalog
+    - file://${oc.env:DLUX_PROJECT,.}/config
+  run:
+    # Namespaced by task/experiment/fold BEFORE the timestamp so concurrent folds of one experiment
+    # (a slurm array) can never resolve to the same dir; %f guards same-fold reruns in the same second.
+    # `dlux.run_key` (registered in bin/train.py) names the fold from `fold` + the endpoint: at compose
+    # time `split_version` is still null on the `fold=` path, which put every sweep under one `None/`.
+    dir: ${paths.log_dir}/${task_name}/${experiment_name}/${dlux.run_key:${split_version},${task.target.field},${fold}}/${now:%Y-%m-%d}_${now:%H-%M-%S-%f}
+force: false # +force=true to overwrite an already-persisted canonical run dir
+random_baseline: false # skip fit, test the untrained (random-init) model — the null for significance testing
+datamodule:
+  batch_size: 16
+  eval_batch_size: 1
+  num_workers: 0 # main-process loading, robust everywhere; raise it (or use ${dlux.auto_workers:}) for parallel loading on a big machine
+  min_tiles: 1 # drop slides with < this many cached tiles at the grid (1 = exclude empty/insufficient)
+trainer:
+  max_epochs: 40
+  accelerator: auto
+  devices: 1
+  log_every_n_steps: 10
+  num_sanity_val_steps: 0 # skip Lightning's pre-flight val (a meaningless 2-sample metric compute)

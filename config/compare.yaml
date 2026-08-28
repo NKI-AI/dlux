@@ -1,0 +1,35 @@
+# @package _global_
+defaults:
+  # Both REQUIRED and cross-checked: the cohort must be one the study declares.
+  - study: ???
+  - cohort: ???
+  - paths: default
+  - hydra: default
+  - _self_
+  # REQUIRED, study-scoped: comparison=<study>/<name>. Names the arms and the reference, and gives
+  # the comparison its output directory. After _self_ so it wins.
+  - comparison: ???
+  - optional local/paths: default
+  - optional project/paths: default
+  - optional local/misc: default
+task_name: compare
+# Set by the chosen comparison config; do not set it here.
+comparison_name: ???
+arms: ???
+reference: ???
+fields: null # null = every endpoint the arms share
+# Which metric to compare on, among the ones the endpoint already computes (null = the endpoint default).
+# binary: auroc|ap|accuracy|balanced_accuracy|f1|mcc|kappa · multiclass: auroc|accuracy|balanced_accuracy|
+# macro_f1|qwk · regression: r2|pearson|spearman · survival: c_index · regression_vector: gene_pearson_mean.
+metric: null
+metric_name: null # display-label override only (does NOT change the metric); null = the metric names itself
+hydra:
+  # A consumer project supplies its own `catalog/` (cohorts, studies, experiments) and `config/`
+  # (custom tasks/models + its cohort paths). Both are search-path roots. Paths are relative to the
+  # process working directory (the repo root); set
+  # DLUX_PROJECT to a consumer project root (it supplies catalog/ and config/).
+  searchpath:
+    - file://${oc.env:DLUX_PROJECT,.}/catalog
+    - file://${oc.env:DLUX_PROJECT,.}/config
+  run:
+    dir: ${paths.log_dir}/compare/${comparison_name}/${now:%Y-%m-%d}_${now:%H-%M-%S-%f}

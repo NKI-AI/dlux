@@ -1,0 +1,19 @@
+# @package task
+# WSISurvivalTask predicts a time-to-event patient endpoint from a single precomputed slide-feature
+# set (ABMIL) via the discrete-time hazard formulation. `target` is the contract survival field; its
+# event + time columns come from the dataset contract. `n_bins` = the number of discrete-time
+# intervals (quantile edges from THIS fold's observed-event times, leakage-clean). The ABMIL head is
+# sized to n_bins hazard logits by the train bin.
+# REQUIRED per run: target must match the field in split_version (e.g. target=pfi with
+# split_version=pfi_cv_o0_i0).
+_target_: dlux.tasks.wsi_survival.WSISurvivalTask
+# The endpoint: a field of the cohort contract, which says what it means and where it lives.
+target:
+  field: ???
+n_bins: 4
+# The data streams this task reads. Names are the contract between the batch, this config and the
+# model's branch keys; add a `bulk_rna` entry here for a fusion arm. A bulk_rna input refuses patients
+# with no RNA row by default — gate them out with `require_modalities: [bulk_rna]` on the study, or opt
+# in to imputation deliberately with `missing: impute_mean`.
+inputs:
+  tile_features: {modality: tile_features}

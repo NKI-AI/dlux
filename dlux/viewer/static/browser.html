@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>dlux — cohort slides</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        padding: 24px 32px;
+        font-family: ui-sans-serif, system-ui, sans-serif;
+        background: #111827;
+        color: #e5e7eb;
+      }
+      h1 {
+        font-size: 20px;
+        margin: 0 0 4px;
+      }
+      .sub {
+        color: #9ca3af;
+        font-size: 13px;
+        margin-bottom: 20px;
+      }
+      #filter {
+        width: 100%;
+        max-width: 480px;
+        padding: 8px 10px;
+        font-size: 14px;
+        margin-bottom: 16px;
+        background: #1f2937;
+        color: #e5e7eb;
+        border: 1px solid #374151;
+        border-radius: 6px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+      }
+      th {
+        text-align: left;
+        color: #9ca3af;
+        font-weight: 500;
+        padding: 8px;
+        border-bottom: 1px solid #374151;
+      }
+      td {
+        padding: 7px 8px;
+        border-bottom: 1px solid #1f2937;
+      }
+      tr:hover td {
+        background: #1f2937;
+      }
+      a {
+        color: #60a5fa;
+        text-decoration: none;
+      }
+      a:hover {
+        text-decoration: underline;
+      }
+      .mono {
+        font-family: ui-monospace, monospace;
+        color: #9ca3af;
+        word-break: break-all;
+      }
+      .yes {
+        color: #34d399;
+      }
+      .no {
+        color: #6b7280;
+      }
+      .roots {
+        font-size: 12px;
+        color: #9ca3af;
+        margin-bottom: 16px;
+        line-height: 1.7;
+      }
+      .roots span {
+        color: #d1d5db;
+        font-family: ui-monospace, monospace;
+      }
+      .expander {
+        width: 24px;
+        cursor: pointer;
+        color: #6b7280;
+        user-select: none;
+        text-align: center;
+      }
+      .expander:hover {
+        color: #e5e7eb;
+      }
+      tr.detail td {
+        border-bottom: 1px solid #1f2937;
+        padding: 0 8px 8px 32px;
+      }
+      tr.detail .mono {
+        font-size: 12px;
+      }
+      .gap {
+        color: #fbbf24;
+      }
+      tr.outside td {
+        opacity: 0.45;
+      }
+      #study-only {
+        margin: 0 0 16px;
+        font-size: 13px;
+        color: #9ca3af;
+        display: none;
+      }
+      #study-only input {
+        vertical-align: -1px;
+        margin-right: 6px;
+      }
+      .key {
+        margin-left: 6px;
+        font-size: 10px;
+        color: #6b7280;
+        border: 1px solid #374151;
+        border-radius: 3px;
+        padding: 0 4px;
+        font-family: ui-monospace, monospace;
+      }
+    </style>
+  </head>
+  <body>
+    <h1 id="title">loading…</h1>
+    <div class="roots" id="roots"></div>
+    <div class="sub" id="count"></div>
+    <input
+      id="filter"
+      placeholder="filter by slide name or patient id…"
+      autocomplete="off"
+    />
+    <label id="study-only"
+      ><input type="checkbox" id="study-only-box" checked />in this study
+      <span class="key">S</span></label
+    >
+    <table>
+      <thead>
+        <tr>
+          <th></th>
+          <th>patient</th>
+          <th>slide</th>
+          <th>mask</th>
+          <th id="pred-head"></th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+
+    <script>
+      let slides = [];
+      let hasRun = false;
+
+      // A slide the study admits but that has no prediction is a gap — a fold that never ran, or a
+      // slide dropped at dataset construction. One the study does not admit is absent by design, and
+      // says so by dimming rather than by a third marker in the column.
+      function predictionCell(s) {
+        if (s.has_prediction) return '<td class="yes">yes</td>';
+        if (s.in_study === false) return '<td class="no">-</td>';
+        return '<td class="gap">missing</td>';
+      }
+
+      function render(filter) {
+        const needle = filter.trim().toLowerCase();
+        const studyOnly =
+          hasRun && document.getElementById("study-only-box").checked;
+        const shown = slides.filter(
+          (s) =>
+            (!studyOnly || s.in_study !== false) &&
+            (!needle ||
+              s.name.toLowerCase().includes(needle) ||
+              (s.patient_id || "").toLowerCase().includes(needle))
+        );
+        document.getElementById("count").textContent =
+          shown.length === slides.length
+            ? `${slides.length} slides`
+            : `${shown.length} of ${slides.length} slides`;
+        // The scope travels with the link so the viewer's prev/next walks the same subset shown here.
+        const scope = studyOnly ? "&scope=in_study" : "";
+        // Full relative path sits behind a per-row expander.
+        const rows = shown
+          .map(
+            (s, i) => `<tr class="${s.in_study === false ? "outside" : ""}">
+              <td class="expander" data-row="${i}" title="show path">&#9656;</td>
+              <td>${s.patient_id || "-"}</td>
+              <td><a href="/viewer?slide=${encodeURIComponent(
+                s.slide_id
+              )}${scope}">${s.name}</a></td>
+              <td class="${s.has_mask ? "yes" : "no"}">${
+              s.has_mask ? "yes" : "no"
+            }</td>
+              ${hasRun ? predictionCell(s) : "<td></td>"}
+            </tr>
+            <tr class="detail" id="detail-${i}" style="display: none">
+              <td colspan="5" class="mono">${s.slide_id}</td>
+            </tr>`
+          )
+          .join("");
+        const body = document.getElementById("rows");
+        body.innerHTML = rows;
+        body.querySelectorAll(".expander").forEach((cell) => {
+          cell.addEventListener("click", () => {
+            const detail = document.getElementById(
+              `detail-${cell.dataset.row}`
+            );
+            const open = detail.style.display !== "none";
+            detail.style.display = open ? "none" : "table-row";
+            cell.innerHTML = open ? "&#9656;" : "&#9662;";
+          });
+        });
+      }
+
+      async function init() {
+        const resp = await fetch("/api/slides");
+        const data = await resp.json();
+        slides = data.slides;
+        hasRun = Boolean(data.run);
+        document.getElementById("title").textContent = `cohort: ${data.cohort}`;
+        document.getElementById("roots").innerHTML =
+          `slides <span>${data.image_dir}</span><br />` +
+          (data.mask_dir
+            ? `masks &nbsp;<span>${data.mask_dir}</span>`
+            : `masks &nbsp;<span>(none)</span>`) +
+          (hasRun
+            ? `<br />run &nbsp;&nbsp;&nbsp;<span>${data.run}</span>`
+            : "");
+        // The column and the toggle exist only while inspecting a run; serving a bare cohort keeps the
+        // list as it was. The toggle also needs the splits to have been readable.
+        if (hasRun) {
+          document.getElementById("pred-head").textContent = "prediction";
+          if (slides.some((s) => s.in_study !== null)) {
+            document.getElementById("study-only").style.display = "block";
+          }
+        }
+        const filter = document.getElementById("filter");
+        render("");
+        filter.addEventListener("input", (e) => render(e.target.value));
+        const studyBox = document.getElementById("study-only-box");
+        studyBox.addEventListener("change", () => render(filter.value));
+        // The filter is a text input, so a bare key must never reach here while it has focus.
+        document.addEventListener("keydown", (e) => {
+          if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT")
+            return;
+          if (e.metaKey || e.ctrlKey || e.altKey) return;
+          if (e.key.toLowerCase() === "s" && studyBox.offsetParent !== null)
+            studyBox.click();
+        });
+      }
+
+      init();
+    </script>
+  </body>
+</html>

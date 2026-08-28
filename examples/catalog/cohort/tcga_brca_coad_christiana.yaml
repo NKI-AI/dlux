@@ -1,0 +1,13 @@
+# @package cohort
+# Open-access reference cohort: TCGA BRCA-vs-COAD, single center "Christiana Healthcare" (one center,
+# never full TCGA). Binary cancer_type endpoint; the development cohort of the tcga_subtyping example.
+# Slides are pulled from GDC with the pinned manifest under scripts/tcga_subtyping/manifests/; sheets are
+# built by scripts/tcga_subtyping/build_sheets.py --center christiana. Reproducible by anyone.
+name: tcga_brca_coad_christiana
+storage:
+  image_dir: ${paths.cohorts.tcga_brca_coad_christiana.image_dir} # set in config/local/paths (see the template)
+  mask_dir: ${paths.cohorts.tcga_brca_coad_christiana.mask_dir}
+  default_reader: FASTSLIDE
+  default_staining: "H&E"
+contract:
+  cancer_type: {type: binary, map: {BRCA: 0, COAD: 1}}

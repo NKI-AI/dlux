@@ -1,0 +1,6 @@
+# Per-stage adapter augmentation for the tile-feature bag. At fit time, randomly
+# sample num_tiles feature vectors per slide (MIL bag subsampling); inference uses
+# the full bag.
+fit:
+  _target_: ahcore.augmentations.tile_features.TileFeaturesAugmentation.for_classification
+  num_tiles: 250

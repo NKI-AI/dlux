@@ -1,0 +1,17 @@
+# @package task
+# WSIRegressionTask predicts one continuous patient endpoint from a single precomputed slide-feature
+# set (ABMIL, MSE). `target` is the contract field to predict; its `regression` objective comes from the
+# dataset contract.
+# REQUIRED per run (no project-wide default — the valid targets differ per cohort); must match the
+# field in split_version (e.g. target=leukocyte_fraction with split_version=leukocyte_fraction_cv_o0_i0).
+_target_: dlux.tasks.wsi_regression.WSIRegressionTask
+# The endpoint: a field of the cohort contract, which says what it means and where it lives.
+target:
+  field: ???
+# `zscore` standardises the target using THIS fold's train-split μ/σ (leakage-clean), de-standardised
+# back to raw units on output. `none` = raw-scale MSE.
+target_normalize: none
+# The data streams this task reads. Names are the contract between the batch, this config and the
+# model's branch keys; add a `bulk_rna` entry here for a fusion arm.
+inputs:
+  tile_features: {modality: tile_features}

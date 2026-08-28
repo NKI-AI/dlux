@@ -1,0 +1,29 @@
+_target_: ahcore.mm_lit_module.MultiModalLightningModule
+# Concat fusion: each branch encodes its modality to an embedding, the embeddings are concatenated, and a
+# head predicts the endpoint. Branch/head dims resolved by the train bin: num_classes from the task,
+# branches.bulk_rna.input_dim from the active gene panel (task.n_genes). Pair with task=wsi_rna_fusion.
+model:
+  _target_: ahcore.models.fusion.fusion_mil.ConcatFusion
+  num_classes: 1 # overridden per-endpoint by the train bin (task.num_classes)
+  modality_dropout: 0.0 # per-sample branch dropout (training only); >0 prevents modality collapse
+  normalize_branches: true # LayerNorm each branch embedding pre-concat -> unit scale, no modality dominates the head
+  classifier_hidden: [] # linear fusion head by default; a hidden layer is an opt-in experiment
+  classifier_dropout: []
+  classifier_activation:
+    _target_: torch.nn.GELU
+  branches:
+    tile_features: # H&E: attention-MIL over the precomputed tile-feature bag -> attention_dim embedding
+      _target_: ahcore.models.encoders.abmil_encoder.ABMILEncoder
+      feature_dim: null # set by the train bin from the .pack (like num_classes)
+      attention_dim: 256
+    bulk_rna: # bulk RNA-seq vector -> MLP -> a fusion-sized embedding (so it doesn't dominate by width)
+      _target_: ahcore.models.encoders.mlp_encoder.MLPEncoder
+      input_dim: 1 # overridden by the train bin (task.n_genes = active gene-panel size)
+      output_dim: 256
+      hidden: [512]
+optimizer:
+  _target_: torch.optim.AdamW
+  _partial_: true
+  lr: 5.0e-5
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
