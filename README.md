@@ -37,6 +37,21 @@ pip install .
 
 Full documentation lives in [`docs/`](docs/README.md). Start there. It opens with a worked example that runs the whole pipeline end to end on public TCGA data with the public Phikon model, then covers the other endpoint types and the recipe-comparison workflow.
 
+## Citation
+
+If you use dlux in your research, please cite it. The repository metadata lives in [`CITATION.cff`](CITATION.cff), or use:
+
+```bibtex
+@software{dlux,
+  title   = {dlux: a standalone, application-agnostic pipeline for whole-slide-image and multimodal classification},
+  author  = {Brunekreef, Joren and {AI for Oncology, The Netherlands Cancer Institute}},
+  year    = {2026},
+  version = {0.1.0},
+  license = {Apache-2.0},
+  url     = {https://github.com/NKI-AI/dlux}
+}
+```
+
 ## Acknowledgements
 
 Built on [ahcore](https://github.com/NKI-AI/ahcore) and [dlup](https://github.com/NKI-AI/dlup).
