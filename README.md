@@ -2,8 +2,6 @@
 
 **A standalone, application-agnostic pipeline for whole-slide-image and multimodal classification.**
 
-> ⚠️ **Pre-release.** The public API is not yet frozen.
-
 ## Overview
 
 dlux predicts patient-level endpoints from whole-slide images. Its most common use, and the path the tutorial walks, extracts tile features once with a frozen foundation model, caches them, and trains a multiple-instance learning model over the cache.
@@ -33,7 +31,7 @@ python -m venv .venv && source .venv/bin/activate
 pip install .
 ```
 
-`pip install .` pulls in all dependencies from PyPI. You then run the pipeline stages from the clone with `python bin/<stage>.py`. dlux needs Python 3.11 to 3.13.
+`pip install .` pulls in all dependencies from PyPI. You then run the pipeline stages from the clone with `python bin/<stage>.py`. dlux needs Python 3.11 or newer.
 
 ## Documentation
 
