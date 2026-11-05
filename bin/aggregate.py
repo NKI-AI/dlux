@@ -24,16 +24,19 @@ classification, predicted-vs-actual scatter + R²-by-fold for regression.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import hydra
-from dlux.config.cohort import Study
-from dlux.eval.aggregate import aggregate_experiment, endpoint_headline, write_reports
 from omegaconf import DictConfig, OmegaConf
 
 from ahcore.utils.io import get_logger
 
+from dlux.config.cohort import Study
+from dlux.config.resolvers import register_resolvers
+from dlux.data import layout
+from dlux.eval.aggregate import aggregate_experiment, endpoint_headline, write_reports
+
 logger = get_logger(__name__)
+
+register_resolvers()
 
 
 @hydra.main(version_base=None, config_path="../config", config_name="aggregate")
@@ -43,13 +46,13 @@ def main(cfg: DictConfig) -> None:
     study_name, cohort_name = study.name, str(cfg.cohort.name)
     experiment_name = str(cfg.experiment_name)
     label = f"{study_name}/{experiment_name}/{cohort_name}"
-    experiment_dir = Path(cfg.paths.studies_dir) / study_name / "runs" / experiment_name / cohort_name
-    out_dir = Path(cfg.paths.studies_dir) / study_name / "results" / experiment_name / cohort_name
+    experiment_dir = layout.runs_dir(cfg.paths.studies_dir, study_name, experiment_name, cohort_name)
+    out_dir = layout.results_dir(cfg.paths.studies_dir, study_name, experiment_name, cohort_name)
 
     # Optional random-baseline experiment (expression) -> SEQUOIA conservative significant-gene count.
     random_experiment = cfg.get("random_experiment", None)
     random_dir = (
-        Path(cfg.paths.studies_dir) / study_name / "runs" / str(random_experiment) / cohort_name
+        layout.runs_dir(cfg.paths.studies_dir, study_name, random_experiment, cohort_name)
         if random_experiment
         else None
     )

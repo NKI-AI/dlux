@@ -69,6 +69,11 @@ class ConcordanceIndex(Metric):
     higher_is_better = True
     full_state_update = False
 
+    # Registered by add_state in __init__, which sets them on the instance rather than here.
+    risk: list[torch.Tensor]
+    time: list[torch.Tensor]
+    event: list[torch.Tensor]
+
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.add_state("risk", default=[], dist_reduce_fx="cat")

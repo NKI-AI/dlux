@@ -17,13 +17,14 @@ from __future__ import annotations
 
 import csv
 
+import numpy as np
 import pytest
+
 from dlux.config.cohort import Objective
 from dlux.eval.external import (
     external_ensemble,
+    label_model,
     supported_objectives,
-    uses_vector_labels,
-    uses_vector_probs,
     write_external_report,
 )
 
@@ -88,16 +89,16 @@ def test_write_report_produces_csv_md_and_figures(tmp_path):
     r = external_ensemble("er", "val_cohort", _per_model(), _LABELS)
     out = write_external_report([r], "dev", tmp_path / "external")
 
-    assert (out / "external_summary.md").exists()
+    assert (out / "summary.md").exists()
     assert (out / "figures" / "roc_er.png").exists()
     assert (out / "figures" / "auroc_by_outer.png").exists()  # one combined strip, not per-field
 
-    # long-format per-patient CSV: field column + one row per (patient × model), models = o0/o1/grand
-    with (out / "per_patient_external.csv").open() as f:
+    # long-format per-patient CSV, one per field: one row per (patient × model), models = o0/o1/grand
+    with (out / "per_patient_er.csv").open() as f:
         rows = list(csv.DictReader(f))
-    assert set(rows[0].keys()) == {"field", "patient_code", "model", "prob", "label"}
+    assert set(rows[0].keys()) == {"patient_code", "model", "prob", "label"}
     assert {row["model"] for row in rows} == {"o0", "o1", "grand"}
-    assert {row["field"] for row in rows} == {"er"}
+    assert (out / "per_fold_metrics.csv").exists() and (out / "per_patient_er.npz").exists()
     assert len(rows) == 4 * 3  # 4 patients × (2 outer + grand)
     grand_p0 = next(row for row in rows if row["patient_code"] == "p0" and row["model"] == "grand")
     assert float(grand_p0["prob"]) == pytest.approx(0.5) and grand_p0["label"] == "1"
@@ -111,9 +112,10 @@ def test_write_report_multi_field(tmp_path):
 
     assert (out / "figures" / "roc_er.png").exists() and (out / "figures" / "roc_her2.png").exists()
     assert (out / "figures" / "auroc_by_outer.png").exists()  # single combined strip across fields
-    md = (out / "external_summary.md").read_text()
+    md = (out / "summary.md").read_text()
     assert "## `er`" in md and "## `her2`" in md
-    with (out / "per_patient_external.csv").open() as f:
+    assert (out / "per_patient_er.csv").exists() and (out / "per_patient_her2.csv").exists()
+    with (out / "per_fold_metrics.csv").open() as f:
         assert {row["field"] for row in csv.DictReader(f)} == {"er", "her2"}
 
 
@@ -148,7 +150,7 @@ def _mc_result():
 def test_multiclass_is_externally_scorable():
     # The capability must not depend on us shipping an example multiclass external study.
     assert "multiclass" in supported_objectives()
-    assert uses_vector_probs(Objective.multiclass) and not uses_vector_probs(Objective.binary)
+    assert label_model(Objective.multiclass).vector_preds and not label_model(Objective.binary).vector_preds
 
 
 def test_multiclass_grand_ensemble_averages_vectors():
@@ -173,13 +175,13 @@ def test_multiclass_report_writes_confusion_per_class_table_and_csv(tmp_path):
     assert (out / "figures" / "confusion_grade.png").exists()
     assert (out / "figures" / "auroc_by_outer.png").exists()
 
-    md = (out / "external_summary.md").read_text()
+    md = (out / "summary.md").read_text()
     assert "## `grade`" in md
     assert "Per-class (GRAND ensemble, one-vs-rest" in md  # section_extra rendered
     assert "macro AUROC" in md  # multiclass column labels, not binary's
 
     # per-field CSV (class count varies by endpoint, so columns cannot be shared across fields)
-    with (out / "per_patient_external_grade.csv").open() as f:
+    with (out / "per_patient_grade.csv").open() as f:
         rows = list(csv.DictReader(f))
     assert set(rows[0].keys()) == {"patient_code", "model", "prob_0", "prob_1", "prob_2", "pred", "label"}
     assert {row["model"] for row in rows} == {"o0", "o1", "grand"}
@@ -211,9 +213,9 @@ def _surv_result():
 
 def test_survival_is_externally_scorable_with_a_vector_label():
     assert "survival" in supported_objectives()
-    # the two shape axes are independent -- this is the case that proves they had to be split
-    assert uses_vector_labels(Objective.survival) and not uses_vector_probs(Objective.survival)
-    assert uses_vector_probs(Objective.multiclass) and not uses_vector_labels(Objective.multiclass)
+    # the two shape axes are independent: survival has vector labels and scalar predictions, multiclass the reverse
+    assert label_model(Objective.survival).vector_labels and not label_model(Objective.survival).vector_preds
+    assert label_model(Objective.multiclass).vector_preds and not label_model(Objective.multiclass).vector_labels
 
 
 def test_survival_counts_events_not_label_sum():
@@ -246,13 +248,13 @@ def test_survival_report_writes_km_and_long_csv(tmp_path):
     out = write_external_report([_surv_result()], "dev", tmp_path / "external")
 
     assert (out / "figures" / "km_os.png").exists()  # KM, not ROC or confusion
-    md = (out / "external_summary.md").read_text()
+    md = (out / "summary.md").read_text()
     assert "## `os`" in md and "C-index" in md
     assert "4 patients (3 positive)" in md  # events surfaced in the header line
 
-    with (out / "per_patient_external_survival.csv").open() as f:
+    with (out / "per_patient_os.csv").open() as f:
         rows = list(csv.DictReader(f))
-    assert set(rows[0].keys()) == {"field", "patient_code", "model", "risk", "time", "event"}
+    assert set(rows[0].keys()) == {"patient_code", "model", "risk", "time", "event"}
     assert len(rows) == 4 * 3  # 4 patients x (2 outer + grand)
     p2 = next(r for r in rows if r["patient_code"] == "p2" and r["model"] == "grand")
     assert float(p2["time"]) == pytest.approx(12.0) and p2["event"] == "0"  # censored patient round-trips
@@ -318,9 +320,9 @@ def test_regression_report_writes_scatter_and_no_shared_strip(tmp_path):
     assert not (out / "figures" / "auroc_by_outer.png").exists()
     assert not (out / "figures" / "r2_by_outer.png").exists()
 
-    with (out / "per_patient_external_regression.csv").open() as f:
+    with (out / "per_patient_leukocyte_fraction.csv").open() as f:
         rows = list(csv.DictReader(f))
-    assert set(rows[0].keys()) == {"field", "patient_code", "model", "predicted", "actual"}
+    assert set(rows[0].keys()) == {"patient_code", "model", "predicted", "actual"}
     assert len(rows) == 4 * 3
     p0 = next(r for r in rows if r["patient_code"] == "p0" and r["model"] == "grand")
     assert float(p0["actual"]) == pytest.approx(-0.5)  # negative target survives the round-trip
@@ -331,8 +333,7 @@ def test_binary_and_multiclass_in_one_report(tmp_path):
     out = write_external_report(
         [external_ensemble("er", "external", _per_model(), _LABELS), _mc_result()], "dev", tmp_path / "external"
     )
-    assert (out / "per_patient_external.csv").exists()  # binary's combined long CSV
-    assert (out / "per_patient_external_grade.csv").exists()  # multiclass's per-field CSV
+    assert (out / "per_patient_er.csv").exists() and (out / "per_patient_grade.csv").exists()
     assert (out / "figures" / "roc_er.png").exists() and (out / "figures" / "confusion_grade.png").exists()
 
 
@@ -363,7 +364,9 @@ def _expr_result():
 
 def test_expression_is_the_both_vectors_case():
     assert "regression_vector" in supported_objectives()
-    assert uses_vector_probs(Objective.regression_vector) and uses_vector_labels(Objective.regression_vector)
+    assert (
+        label_model(Objective.regression_vector).vector_preds and label_model(Objective.regression_vector).vector_labels
+    )
     assert supported_objectives() == ["binary", "multiclass", "regression", "regression_vector", "survival"]
 
 
@@ -388,7 +391,7 @@ def test_expression_report_writes_per_gene_csv_and_histogram(tmp_path):
     assert not (out / "figures" / "auroc_by_outer.png").exists()  # opts out of the shared strip
 
     # per-GENE, not per-patient: a per-patient row would be a 20k-gene vector.
-    with (out / "per_gene_external_expression.csv").open() as f:
+    with (out / "per_gene_pearson_expression.csv").open() as f:
         rows = list(csv.DictReader(f))
     assert set(rows[0].keys()) == {"gene_index", "grand_pearson"}
     assert len(rows) == 3
@@ -399,10 +402,24 @@ def test_expression_report_writes_per_gene_csv_and_histogram(tmp_path):
 def test_expression_report_shows_significant_gene_count_only_when_a_random_arm_was_scored(tmp_path):
     # No random arm (conservative is None) -> the null line is absent.
     plain = write_external_report([_expr_result()], "dev", tmp_path / "plain")
-    assert "Well-predicted genes" not in (plain / "external_summary.md").read_text()
+    assert "Well-predicted genes" not in (plain / "summary.md").read_text()
     # With a trained-vs-random count attached -> the line renders, with the df=n-3 underpowered caveat.
     res = _expr_result()
     res.conservative = {"n_significant": 1588, "n_scored": 17485, "alpha": 0.05, "fdr": 0.2}
     withnull = write_external_report([res], "dev", tmp_path / "withnull")
-    text = (withnull / "external_summary.md").read_text()
+    text = (withnull / "summary.md").read_text()
     assert "1588 / 17485" in text and "df = n" in text
+
+
+def test_the_external_npz_holds_the_grand_and_every_outer_ensemble(tmp_path):
+    from dlux.eval.external import write_external_npz
+
+    r = external_ensemble("er", "val_cohort", _per_model(), _LABELS)
+    write_external_npz(r, tmp_path / "per_patient_er.npz")
+    with np.load(tmp_path / "per_patient_er.npz", allow_pickle=False) as table:
+        assert table["patient_codes"].tolist() == ["p0", "p1", "p2", "p3"]
+        assert table["preds"].tolist() == [0.5, 0.5, 0.5, 0.5]
+        assert table["labels"].tolist() == [float(_LABELS[p]) for p in ["p0", "p1", "p2", "p3"]]
+        assert str(table["endpoint_type"]) == "binary"
+        assert table["ensemble_outer_folds"].tolist() == [0, 1]
+        np.testing.assert_allclose(table["outer_preds"][0], [0.8, 0.2, 0.7, 0.3])

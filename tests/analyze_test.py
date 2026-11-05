@@ -16,8 +16,9 @@
 from __future__ import annotations
 
 import pytest
-from dlux.data.analyze import _imbalance_lines, class_weight_snippet
 from pydantic import ValidationError
+
+from dlux.data.analyze import _imbalance_lines, class_weight_snippet
 
 
 def test_no_callout_when_the_endpoint_is_near_balanced():

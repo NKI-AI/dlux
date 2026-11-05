@@ -20,8 +20,9 @@ quietly built from its config defaults."""
 from __future__ import annotations
 
 import pytest
+from omegaconf import DictConfig, OmegaConf
+
 from dlux.models import size_model
-from omegaconf import OmegaConf
 
 
 class _Stream:
@@ -35,7 +36,7 @@ class _Task:
         self.inputs = {name: _Stream(w) for name, w in inputs.items()}
 
 
-def _fusion_cfg() -> OmegaConf:
+def _fusion_cfg() -> DictConfig:
     return OmegaConf.create(
         {
             "lit_module": {
@@ -51,7 +52,7 @@ def _fusion_cfg() -> OmegaConf:
     )
 
 
-def _flat_cfg() -> OmegaConf:
+def _flat_cfg() -> DictConfig:
     return OmegaConf.create(
         {"lit_module": {"model": {"num_classes": 1, "input_key": "tile_features", "feature_dim": None}}}
     )

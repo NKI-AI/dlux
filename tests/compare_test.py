@@ -19,19 +19,41 @@ import csv
 
 import numpy as np
 import pytest
+
+from dlux.data import layout
 from dlux.data.errors import BuildDbError
-from dlux.eval.compare import binary_auroc, compare_arms, default_metric_key, resolve_metric, write_comparison
+from dlux.eval.compare import (
+    binary_auroc,
+    compare_arms,
+    default_metric_key,
+    resolve_metric,
+    score_predictions,
+    write_comparison,
+)
 
 
-def _arm(results_dir, arm, cohort, rows):
-    """Write one arm's per_patient_ensemble.csv. ``rows`` is (field, fold, patient, pred, label)."""
-    out = results_dir / arm / cohort
-    out.mkdir(parents=True)
-    with (out / "per_patient_ensemble.csv").open("w", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["field", "outer_fold", "patient_code", "ensemble_prediction", "label", "n_replicates"])
-        for field, fold, patient, pred, label in rows:
-            writer.writerow([field, fold, patient, pred, label, 5])
+def _npz(results_dir, arm, cohort, field, objective, rows):
+    """Write one endpoint's per_patient_<field>.npz the way aggregate does. ``rows`` is (patient, fold, pred,
+    label), where a prediction or a label may be a vector."""
+    out = layout.results_dir(results_dir, "s", arm, cohort)
+    out.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        out / f"per_patient_{field}.npz",
+        patient_codes=np.asarray([r[0] for r in rows]),
+        outer_folds=np.asarray([r[1] for r in rows], dtype=np.int64),
+        preds=np.asarray([r[2] for r in rows], dtype=np.float64),
+        labels=np.asarray([r[3] for r in rows], dtype=np.float64),
+        endpoint_type=np.asarray(objective),
+    )
+
+
+def _arm(results_dir, arm, cohort, rows, objective="binary"):
+    """Write one arm's per-patient NPZs. ``rows`` is (field, fold, patient, pred, label)."""
+    by_field: dict = {}
+    for field, fold, patient, pred, label in rows:
+        by_field.setdefault(field, []).append((patient, fold, pred, label))
+    for field, field_rows in by_field.items():
+        _npz(results_dir, arm, cohort, field, objective, field_rows)
 
 
 def _rows(preds, labels, field="er", fold=0):
@@ -44,7 +66,7 @@ LABELS = [0, 0, 1, 1]
 def test_perfect_and_inverted_arms_score_as_expected(tmp_path):
     _arm(tmp_path, "good", "c", _rows([0.1, 0.2, 0.8, 0.9], LABELS))
     _arm(tmp_path, "bad", "c", _rows([0.9, 0.8, 0.2, 0.1], LABELS))
-    (comparison,) = compare_arms(tmp_path, "c", ["good", "bad"], reference="good")
+    (comparison,) = compare_arms(tmp_path, "s", "c", ["good", "bad"], reference="good")
     scores = {s.arm: s.pooled for s in comparison.scores}
     assert scores["good"] == pytest.approx(1.0)
     assert scores["bad"] == pytest.approx(0.0)
@@ -59,7 +81,7 @@ def test_delta_is_paired_per_fold(tmp_path):
     rows_b = [(f, fo, f"{p}_{fo}", pr, y) for f, fo, p, pr, y in rows_b]
     _arm(tmp_path, "a", "c", rows_a)
     _arm(tmp_path, "b", "c", rows_b)
-    (comparison,) = compare_arms(tmp_path, "c", ["a", "b"], reference="a")
+    (comparison,) = compare_arms(tmp_path, "s", "c", ["a", "b"], reference="a")
     # Fold 0 identical, fold 1 inverted: the delta is per fold, not an average of marginals.
     assert comparison.deltas["b"] == {0: pytest.approx(0.0), 1: pytest.approx(-1.0)}
 
@@ -69,7 +91,7 @@ def test_different_patient_sets_are_intersected_and_coverage_reported(tmp_path):
     metric is held to the shared set so it describes one population, and the gap is reported."""
     _arm(tmp_path, "a", "c", _rows([0.1, 0.2, 0.8, 0.9], LABELS))
     _arm(tmp_path, "b", "c", _rows([0.1, 0.2, 0.8], LABELS[:3]))
-    (comparison,) = compare_arms(tmp_path, "c", ["a", "b"], reference="a")
+    (comparison,) = compare_arms(tmp_path, "s", "c", ["a", "b"], reference="a")
     assert comparison.n_patients == 3  # scored on the shared set, not either arm's own
     assert comparison.coverage == {"a": 4, "b": 3}
     assert comparison.coverage_differs
@@ -80,13 +102,13 @@ def test_no_shared_patients_is_refused(tmp_path):
     _arm(tmp_path, "a", "c", [("er", 0, "x0", 0.1, 0), ("er", 0, "x1", 0.9, 1)])
     _arm(tmp_path, "b", "c", [("er", 0, "y0", 0.1, 0), ("er", 0, "y1", 0.9, 1)])
     with pytest.raises(BuildDbError, match="share no patient"):
-        compare_arms(tmp_path, "c", ["a", "b"], reference="a")
+        compare_arms(tmp_path, "s", "c", ["a", "b"], reference="a")
 
 
 def test_coverage_is_equal_when_arms_match(tmp_path):
     _arm(tmp_path, "a", "c", _rows([0.1, 0.2, 0.8, 0.9], LABELS))
     _arm(tmp_path, "b", "c", _rows([0.9, 0.8, 0.2, 0.1], LABELS))
-    (comparison,) = compare_arms(tmp_path, "c", ["a", "b"], reference="a")
+    (comparison,) = compare_arms(tmp_path, "s", "c", ["a", "b"], reference="a")
     assert comparison.coverage == {"a": 4, "b": 4} and not comparison.coverage_differs
 
 
@@ -94,20 +116,20 @@ def test_disagreeing_labels_are_refused(tmp_path):
     _arm(tmp_path, "a", "c", _rows([0.1, 0.2, 0.8, 0.9], LABELS))
     _arm(tmp_path, "b", "c", _rows([0.1, 0.2, 0.8, 0.9], [0, 1, 1, 1]))
     with pytest.raises(BuildDbError, match="disagree on the label"):
-        compare_arms(tmp_path, "c", ["a", "b"], reference="a")
+        compare_arms(tmp_path, "s", "c", ["a", "b"], reference="a")
 
 
 def test_unaggregated_arm_is_refused(tmp_path):
     _arm(tmp_path, "a", "c", _rows([0.1, 0.2, 0.8, 0.9], LABELS))
     with pytest.raises(BuildDbError, match="has to be aggregated first"):
-        compare_arms(tmp_path, "c", ["a", "missing"], reference="a")
+        compare_arms(tmp_path, "s", "c", ["a", "missing"], reference="a")
 
 
 def test_reference_must_be_one_of_the_arms(tmp_path):
     _arm(tmp_path, "a", "c", _rows([0.1, 0.2, 0.8, 0.9], LABELS))
     _arm(tmp_path, "b", "c", _rows([0.1, 0.2, 0.8, 0.9], LABELS))
     with pytest.raises(BuildDbError, match="is not among the arms"):
-        compare_arms(tmp_path, "c", ["a", "b"], reference="c")
+        compare_arms(tmp_path, "s", "c", ["a", "b"], reference="c")
 
 
 def test_an_arm_against_itself_is_exactly_zero(tmp_path):
@@ -115,7 +137,7 @@ def test_an_arm_against_itself_is_exactly_zero(tmp_path):
     rows = _rows([0.1, 0.7, 0.3, 0.9], LABELS)
     _arm(tmp_path, "a", "c", rows)
     _arm(tmp_path, "copy", "c", rows)
-    (comparison,) = compare_arms(tmp_path, "c", ["a", "copy"], reference="a")
+    (comparison,) = compare_arms(tmp_path, "s", "c", ["a", "copy"], reference="a")
     assert comparison.pooled_deltas["copy"] == 0.0
     assert set(comparison.deltas["copy"].values()) == {0.0}
 
@@ -124,7 +146,7 @@ def test_arms_are_compared_on_every_shared_endpoint(tmp_path):
     both = _rows([0.1, 0.2, 0.8, 0.9], LABELS, field="er") + _rows([0.1, 0.2, 0.8, 0.9], LABELS, field="her2")
     _arm(tmp_path, "a", "c", both)
     _arm(tmp_path, "b", "c", both)
-    comparisons = compare_arms(tmp_path, "c", ["a", "b"], reference="a")
+    comparisons = compare_arms(tmp_path, "s", "c", ["a", "b"], reference="a")
     assert [c.field for c in comparisons] == ["er", "her2"]
 
 
@@ -132,42 +154,26 @@ def test_metric_is_undefined_for_a_single_class():
     assert np.isnan(binary_auroc(np.array([1.0, 1.0]), np.array([0.3, 0.8])))
 
 
-def _predictions(results_dir, arm, cohort, field, header, rows, ensemble_rows=None):
-    """Write one arm's predictions_<field>.csv, plus the ensemble table compare reads to learn which
-    endpoints an arm scored."""
-    out = results_dir / arm / cohort
-    out.mkdir(parents=True, exist_ok=True)
-    with (out / f"predictions_{field}.csv").open("w", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(header)
-        writer.writerows(rows)
-    with (out / "per_patient_ensemble.csv").open("w", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["field", "outer_fold", "patient_code", "ensemble_prediction", "label", "n_replicates"])
-        for patient, fold in ensemble_rows or [(r[0], r[1]) for r in rows]:
-            writer.writerow([field, fold, patient, 0.0, 0.0, 5])
-
-
 def test_regression_scores_on_r2(tmp_path):
-    """R² reads straight off the ensemble table, and 0 is the mean-predictor rather than a floor."""
+    """0 is the mean-predictor rather than a floor."""
     truth = [1.0, 2.0, 3.0, 4.0]
-    _arm(tmp_path, "good", "c", _rows(truth, truth, field="lf"))
-    _arm(tmp_path, "flat", "c", _rows([2.5] * 4, truth, field="lf"))
-    (comparison,) = compare_arms(tmp_path, "c", ["good", "flat"], reference="good", objective="regression")
+    _arm(tmp_path, "good", "c", _rows(truth, truth, field="lf"), objective="regression")
+    _arm(tmp_path, "flat", "c", _rows([2.5] * 4, truth, field="lf"), objective="regression")
+    (comparison,) = compare_arms(tmp_path, "s", "c", ["good", "flat"], reference="good", objective="regression")
     scores = {s.arm: s.pooled for s in comparison.scores}
     assert scores["good"] == pytest.approx(1.0)
     assert scores["flat"] == pytest.approx(0.0)  # predicting the mean
 
 
-def test_multiclass_reads_probabilities_not_the_argmax_class(tmp_path):
-    """The ensemble table holds only the argmax class, so a macro AUROC has to come from
-    predictions_<field>.csv. A perfect and an inverted arm bracket the metric."""
-    header = ["patient_code", "outer_fold", "prob_0", "prob_1", "prob_2", "pred", "label"]
-    good = [["p0", 0, 0.8, 0.1, 0.1, 0, 0], ["p1", 0, 0.1, 0.8, 0.1, 1, 1], ["p2", 0, 0.1, 0.1, 0.8, 2, 2]]
-    bad = [["p0", 0, 0.1, 0.1, 0.8, 2, 0], ["p1", 0, 0.8, 0.1, 0.1, 0, 1], ["p2", 0, 0.1, 0.8, 0.1, 1, 2]]
-    _predictions(tmp_path, "good", "c", "grade", header, good)
-    _predictions(tmp_path, "bad", "c", "grade", header, bad)
-    (comparison,) = compare_arms(tmp_path, "c", ["good", "bad"], reference="good", objective="multiclass")
+_GOOD_MULTICLASS = [("p0", 0, [0.8, 0.1, 0.1], 0), ("p1", 0, [0.1, 0.8, 0.1], 1), ("p2", 0, [0.1, 0.1, 0.8], 2)]
+_BAD_MULTICLASS = [("p0", 0, [0.1, 0.1, 0.8], 0), ("p1", 0, [0.8, 0.1, 0.1], 1), ("p2", 0, [0.1, 0.8, 0.1], 2)]
+
+
+def test_multiclass_scores_the_class_probabilities(tmp_path):
+    """A macro AUROC is computed from the class probabilities. A perfect and an inverted arm bracket it."""
+    _npz(tmp_path, "good", "c", "grade", "multiclass", _GOOD_MULTICLASS)
+    _npz(tmp_path, "bad", "c", "grade", "multiclass", _BAD_MULTICLASS)
+    (comparison,) = compare_arms(tmp_path, "s", "c", ["good", "bad"], reference="good", objective="multiclass")
     scores = {s.arm: s.pooled for s in comparison.scores}
     assert scores["good"] == pytest.approx(1.0)
     assert scores["bad"] < scores["good"]
@@ -187,13 +193,10 @@ def test_resolve_metric_default_selection_and_errors():
 
 def test_compare_arms_scores_on_the_selected_metric(tmp_path):
     """A multiclass comparison can be made on QWK instead of the default macro-AUROC."""
-    header = ["patient_code", "outer_fold", "prob_0", "prob_1", "prob_2", "pred", "label"]
-    good = [["p0", 0, 0.8, 0.1, 0.1, 0, 0], ["p1", 0, 0.1, 0.8, 0.1, 1, 1], ["p2", 0, 0.1, 0.1, 0.8, 2, 2]]
-    bad = [["p0", 0, 0.1, 0.1, 0.8, 2, 0], ["p1", 0, 0.8, 0.1, 0.1, 0, 1], ["p2", 0, 0.1, 0.8, 0.1, 1, 2]]
-    _predictions(tmp_path, "good", "c", "grade", header, good)
-    _predictions(tmp_path, "bad", "c", "grade", header, bad)
+    _npz(tmp_path, "good", "c", "grade", "multiclass", _GOOD_MULTICLASS)
+    _npz(tmp_path, "bad", "c", "grade", "multiclass", _BAD_MULTICLASS)
     (comparison,) = compare_arms(
-        tmp_path, "c", ["good", "bad"], reference="good", objective="multiclass", metric_key="qwk"
+        tmp_path, "s", "c", ["good", "bad"], reference="good", objective="multiclass", metric_key="qwk"
     )
     scores = {s.arm: s.pooled for s in comparison.scores}
     assert scores["good"] == pytest.approx(1.0)  # perfect predictions -> QWK 1
@@ -201,42 +204,74 @@ def test_compare_arms_scores_on_the_selected_metric(tmp_path):
 
 
 def test_survival_needs_the_event_indicator(tmp_path):
-    """The ensemble table records time as the label and drops `event`, so a C-index is only
-    computable from predictions_<field>.csv. Higher risk on shorter survival is concordant."""
-    header = ["patient_code", "outer_fold", "risk", "time", "event"]
-    good = [["p0", 0, 2.0, 1.0, 1], ["p1", 0, 1.0, 5.0, 1], ["p2", 0, 0.0, 9.0, 1]]
-    bad = [["p0", 0, 0.0, 1.0, 1], ["p1", 0, 1.0, 5.0, 1], ["p2", 0, 2.0, 9.0, 1]]
-    _predictions(tmp_path, "good", "c", "os", header, good)
-    _predictions(tmp_path, "bad", "c", "os", header, bad)
-    (comparison,) = compare_arms(tmp_path, "c", ["good", "bad"], reference="good", objective="survival")
+    """The label is the (time, event) pair. Higher risk on shorter survival is concordant."""
+    good = [("p0", 0, 2.0, [1.0, 1]), ("p1", 0, 1.0, [5.0, 1]), ("p2", 0, 0.0, [9.0, 1])]
+    bad = [("p0", 0, 0.0, [1.0, 1]), ("p1", 0, 1.0, [5.0, 1]), ("p2", 0, 2.0, [9.0, 1])]
+    _npz(tmp_path, "good", "c", "os", "survival", good)
+    _npz(tmp_path, "bad", "c", "os", "survival", bad)
+    (comparison,) = compare_arms(tmp_path, "s", "c", ["good", "bad"], reference="good", objective="survival")
     scores = {s.arm: s.pooled for s in comparison.scores}
     assert scores["good"] == pytest.approx(1.0)
     assert scores["bad"] == pytest.approx(0.0)
     assert comparison.pooled_deltas["bad"] == pytest.approx(-1.0)
 
 
-def test_missing_predictions_table_is_refused(tmp_path):
-    """An arm aggregated before the endpoint's per-prediction table existed must be refused, not
-    scored off the ensemble table it cannot support."""
-    header = ["patient_code", "outer_fold", "risk", "time", "event"]
-    rows = [["p0", 0, 2.0, 1.0, 1], ["p1", 0, 1.0, 5.0, 1]]
-    _predictions(tmp_path, "a", "c", "os", header, rows)
-    _arm(tmp_path, "b", "c", _rows([0.1, 0.2], [1.0, 5.0], field="os"))
-    with pytest.raises(BuildDbError, match="predictions_os.csv"):
-        compare_arms(tmp_path, "c", ["a", "b"], reference="a", objective="survival")
+def test_an_npz_of_another_objective_is_refused(tmp_path):
+    """An arm whose per-patient table holds another kind of endpoint is refused, not scored as this one."""
+    _npz(tmp_path, "a", "c", "os", "survival", [("p0", 0, 2.0, [1.0, 1]), ("p1", 0, 1.0, [5.0, 1])])
+    _arm(tmp_path, "b", "c", _rows([0.1, 0.2], [1.0, 0.0], field="os"))
+    with pytest.raises(BuildDbError, match="holds a binary endpoint, not survival"):
+        compare_arms(tmp_path, "s", "c", ["a", "b"], reference="a", objective="survival")
 
 
-def test_report_writes_both_figures_and_the_table(tmp_path):
+def test_report_writes_both_figures_and_the_per_fold_numbers(tmp_path):
     _arm(tmp_path, "a", "c", _rows([0.1, 0.2, 0.8, 0.9], LABELS))
     _arm(tmp_path, "b", "c", _rows([0.9, 0.8, 0.2, 0.1], LABELS))
-    comparisons = compare_arms(tmp_path, "c", ["a", "b"], reference="a")
+    comparisons = compare_arms(tmp_path, "s", "c", ["a", "b"], reference="a")
     out = tmp_path / "out"
-    summary = write_comparison(comparisons, "demo", out)
+    text = write_comparison(comparisons, "demo", out).read_text()
     assert (out / "metric.png").is_file() and (out / "deltas.png").is_file()
-    text = summary.read_text()
-    assert "demo" in text and "a" in text and "b" in text
+    with (out / "per_fold.csv").open() as handle:
+        rows = [(r["arm"], r["outer_fold"], r["auroc"], r["delta_vs_a"]) for r in csv.DictReader(handle)]
+    assert rows == [("a", "0", "1.000000", ""), ("b", "0", "0.000000", "-1.000000")]
+    assert "| a (ref) | 1.000 | 1.000 |" in text and "| b | 0.000 | 0.000 |" in text
+    assert "| b | -1.000 | -1.000 |" in text  # the paired-delta table
     # The report states what it does NOT compute, so the numbers are not over-read.
     assert "No test, interval or p-value" in text
-    with (out / "per_fold.csv").open() as handle:
-        rows = list(csv.DictReader(handle))
-    assert len(rows) == 2 and {"field", "arm", "outer_fold", "auroc"} <= set(rows[0])
+
+
+def test_score_predictions_scores_patients_not_slides():
+    """p1's two slides average to 0.5, below p3's 0.6. Scored per slide, p1's 0.9 would rank first."""
+    preds = {
+        "patient_codes": ["p1", "p1", "p2", "p3"],
+        "probs": np.array([0.9, 0.1, 0.2, 0.6]),
+        "labels": np.array([0, 0, 0, 1]),
+    }
+    assert score_predictions(preds, "binary") == (1.0, 3, 1)
+
+
+def test_score_predictions_counts_events_for_survival():
+    """The survival label is the (time, event) pair, so the positive count is the events, and higher risk
+    on the earlier event is concordant."""
+    preds = {
+        "patient_codes": ["p1", "p2", "p3"],
+        "probs": np.array([-1.0, -2.0, -3.0]),
+        "labels": np.array([[10.0, 1.0], [20.0, 1.0], [30.0, 0.0]]),
+    }
+    assert score_predictions(preds, "survival") == (1.0, 3, 2)
+
+
+def test_an_endpoint_one_arm_lacks_is_refused(tmp_path):
+    _arm(tmp_path, "a", "c", _rows([0.1, 0.2, 0.8, 0.9], LABELS) + _rows([0.1, 0.2, 0.8, 0.9], LABELS, field="pr"))
+    _arm(tmp_path, "b", "c", _rows([0.1, 0.2, 0.8, 0.9], LABELS))
+    with pytest.raises(BuildDbError, match="'pr': \\['b'\\]"):
+        compare_arms(tmp_path, "s", "c", ["a", "b"], reference="a")
+    with pytest.raises(BuildDbError, match="'pr': \\['b'\\]"):
+        compare_arms(tmp_path, "s", "c", ["a", "b"], reference="a", fields=["pr"])
+
+
+def test_arms_that_put_a_patient_in_different_outer_folds_are_refused(tmp_path):
+    _arm(tmp_path, "a", "c", _rows([0.1, 0.2, 0.8, 0.9], LABELS, fold=0))
+    _arm(tmp_path, "b", "c", _rows([0.1, 0.2, 0.8, 0.9], LABELS, fold=1))
+    with pytest.raises(BuildDbError, match="different outer folds"):
+        compare_arms(tmp_path, "s", "c", ["a", "b"], reference="a")

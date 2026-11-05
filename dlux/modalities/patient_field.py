@@ -13,14 +13,13 @@
 # limitations under the License.
 """Patient fields: named columns from the cohort's patient sheet, one value per patient.
 
-Today this is how every scalar endpoint's label is read (the contract field's column, mapped through
-the contract's transform). It is the same stream a clinical covariate would come from, which is why it
-is a modality rather than a hardcoded "label adapter".
+Every scalar endpoint's label is read through this stream (the contract field's column, mapped through
+the contract's transform). A clinical covariate comes from the same stream, so it is a modality.
 """
 
 from __future__ import annotations
 
-from typing import Callable, Dict, Optional, Sequence
+from typing import Dict, Optional, Sequence
 
 from ahcore.data.adapters.patient_label import PatientLabelAdapter
 from ahcore.data.interfaces import ShapePolicy
@@ -37,11 +36,11 @@ class PatientField:
         *,
         key: str,
         fields: Sequence[str],
-        transforms: Optional[Dict[str, Callable]] = None,
+        transforms: Optional[Dict[str, "PatientLabelAdapter.Transform"]] = None,
     ) -> None:
         self.key = key
         self.fields = list(fields)
-        self.transforms = dict(transforms or {})
+        self.transforms: Dict[str, "PatientLabelAdapter.Transform"] = dict(transforms or {})
 
     @property
     def width(self) -> int:

@@ -19,12 +19,12 @@ kinds exist and they behave differently when scoring an external cohort:
 - **training-only** (survival's time bin edges): scoring never needs it.
 - **inference-relevant and already recorded** (a z-scored regression target's μ/σ, in ``metadata.json``).
 - **inference-relevant and otherwise lost**, what this module exists for. Recomputing such state on the
-  cohort being scored would silently change the model's input distribution, so it is replayed instead.
+  cohort being scored would silently change the model's input distribution, so it is restored from the record instead.
 
 A modality opts in by defining ``fit_state() -> dict``. One without it simply has nothing to record.
 This module never learns what any particular state means, it visits a task's streams, writes what they
 hand back, and reads it back keyed by stream name. What the payload is, and how to restore it, belongs
-to the modality (see ``BulkRNA.fit_state`` / ``BulkRNA.replay_stats``).
+to the modality (see ``BulkRNA.fit_state`` / ``BulkRNA.recorded_stats``).
 
 The file is a single ``.npz`` because these payloads are arrays: a 2 000-gene panel is ~16 KB per fold.
 Callers choose the directory, training writes it beside the fold's other artifacts, external eval reads
@@ -65,21 +65,26 @@ def apply_stream_state(task: Any, state: Dict[str, dict]) -> None:
     external cohort runs many folds' models over one dataset. Everything else about a stream is
     fold-independent, so the dataset is built once and only the state is swapped between folds.
 
-    **This is sound only while no modality's adapter captures fit-derived state**, an adapter is
+    This is sound only while no modality's adapter captures fit-derived state. An adapter is
     constructed with the dataset and outlives the swap, so state baked into one would silently keep its
-    original value. Today that holds (``BulkRNA.adapter`` captures the matrix path, gene ids and panel
+    original value. It holds for every modality here (``BulkRNA.adapter`` captures the matrix path, gene ids and panel
     name; the statistics are applied later, at forward time) and ``BulkRNA.load_fit_state`` enforces the
     part that could drift by refusing a changed gene set. A future modality that standardises inside its
     adapter must not rely on this path.
 
-    A stream with recorded state that cannot consume it is an error, not something to skip: it means the
-    record and the code have diverged, and scoring would silently use whatever the stream was built with.
+    Recorded state for a stream the task does not declare, and a stream with recorded state that cannot
+    consume it, are errors: either means the record and the code have diverged, and scoring would silently
+    use whatever the stream was built with.
     """
     by_key = {stream.key: stream for stream in task.streams}
+    undeclared = sorted(set(state) - set(by_key))
+    if undeclared:
+        raise ValueError(
+            f"recorded fit state for stream(s) {undeclared} that the task does not declare "
+            f"(it declares {sorted(by_key)}): the record and the task have diverged."
+        )
     for stream_key, payload in state.items():
-        stream = by_key.get(stream_key)
-        if stream is None:
-            continue  # the record covers a stream this task does not declare; not this function's call
+        stream = by_key[stream_key]
         loader = getattr(stream, "load_fit_state", None)
         if loader is None:
             raise ValueError(

@@ -21,7 +21,7 @@ seed, with no run shared between the two clouds:
 
 ``delta_real`` carries the configuration effect plus training noise. ``delta_null`` carries training
 noise alone, so the question "is the difference bigger than noise" is answered by comparing two
-clouds rather than by assuming a distribution. See ``docs/specs/COMPARE_SPEC.md`` sections 6/6b.
+clouds rather than by assuming a distribution. See ``docs/specs/COMPARE_SPEC.md`` §1.5 and §2.5.
 
 The null pools every arm's within-arm pair. A null measured on the reference alone has variance
 ``2*var_ref``, while ``delta_real`` carries ``var_ref + var_arm``, equal only if the arms are equally
@@ -33,9 +33,11 @@ possible: any reference-vs-arm difference contains the effect by construction.
 from __future__ import annotations
 
 import csv
+import dataclasses
+import hashlib
 import json
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Sequence
 
@@ -54,6 +56,41 @@ REQUIRED_REPS = (REAL_REP, *NULL_REPS)
 MARGIN_PERCENTILE = 95.0
 
 
+def row_path(rows_dir: Path, experiment: str, field: str, seed: int, rep: int) -> Path:
+    """The row file of one trial, named by the run identity ``(experiment, field, seed, rep)``.
+
+    One file per trial, so concurrent array tasks never write the same file. The file's existence is the
+    resumability sentinel."""
+    return Path(rows_dir) / f"{experiment}__{field}__s{seed:04d}_r{rep}.json"
+
+
+def write_row(path: Path, row: dict) -> None:
+    """Write one trial's row through a temp file and an atomic rename, so a killed task leaves no
+    half-written row behind."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(row, indent=2))
+    tmp.rename(path)
+
+
+def train_seed(experiment: str, seed: int, rep: int) -> int:
+    """The training seed of one trial. The split is drawn from ``seed`` alone, so every arm at one seed
+    sees identical data and the comparison is paired. Training randomness is seeded by all three axes:
+
+    - ``rep``: without it rep 1 reproduces rep 0 and the null cloud collapses to zeros.
+    - ``experiment``: without it two arms share a torch seed at every seed, which makes delta_real
+      quieter than delta_null and biases the comparison toward declaring an effect
+      (``docs/specs/COMPARE_SPEC.md`` §2.5). This bites hardest for two arms that differ only in a knob:
+      they share an architecture, so a shared seed would give them matched randomness that the null pairs
+      do not have.
+
+    The arm salt is a sha256 of the arm name rather than ``hash()``: Python salts str hashing per process,
+    so ``hash()`` would give a different training seed on every invocation."""
+    arm_salt = int(hashlib.sha256(experiment.encode()).hexdigest()[:8], 16)
+    return (arm_salt + seed * 1_000_003 + rep * 7_919) % (2**31 - 1)
+
+
 @dataclass
 class Trial:
     """One persisted row: one arm, one seed, one replicate."""
@@ -63,7 +100,6 @@ class Trial:
     seed: int
     rep: int
     metric: float
-    metric_slide: float
     n_declared: int
     n_test: int
     split_hash: str
@@ -95,17 +131,17 @@ class ResplitComparison:
     arms: List[ArmResult]
     delta_null: np.ndarray
     #: arm -> the within-arm differences that went into ``delta_null`` (reference included).
-    null_by_arm: Dict[str, np.ndarray] = field(default_factory=dict)
+    null_by_arm: Dict[str, np.ndarray] = dataclasses.field(default_factory=dict)
     #: Per-arm absolute metric at rep 0, for the "what were the numbers" table.
-    absolute: Dict[str, np.ndarray] = field(default_factory=dict)
+    absolute: Dict[str, np.ndarray] = dataclasses.field(default_factory=dict)
     #: arm -> rep -> absolute metric per seed. The within-arm spread across reps IS the null, so
     #: showing it beside the arms' separation makes the whole comparison readable in one panel.
-    absolute_by_rep: Dict[str, Dict[int, np.ndarray]] = field(default_factory=dict)
+    absolute_by_rep: Dict[str, Dict[int, np.ndarray]] = dataclasses.field(default_factory=dict)
     #: seed -> (declared, scored) summed over arms; a systematic coverage loss must not hide.
-    coverage: Dict[str, tuple] = field(default_factory=dict)
+    coverage: Dict[str, tuple] = dataclasses.field(default_factory=dict)
     #: arm -> seeds it had complete but that the intersection discarded. Never silent: an R smaller
     #: than the sweep looks like "we ran R" unless the report says what was dropped and why.
-    dropped: Dict[str, int] = field(default_factory=dict)
+    dropped: Dict[str, int] = dataclasses.field(default_factory=dict)
 
     @property
     def margin(self) -> float:
@@ -124,17 +160,16 @@ def read_rows(rows_dir: Path) -> List[Trial]:
     if not paths:
         raise BuildDbError(
             f"no resplit rows under {rows_dir}. compare_resplits reads persisted trials only. Run the "
-            f"sweep first (slurm/resplit_sweep.sh)."
+            f"trials first (bin/train_resplit.py, one per arm, seed and replicate)."
         )
     trials = []
     for path in paths:
         row = json.loads(path.read_text())
-        for key in ("metric", "metric_slide"):
-            if isinstance(row.get(key), str):
-                raise BuildDbError(
-                    f"{path.name} stores '{key}' as a string ({row[key]!r}), but metrics must be numeric. "
-                    f"Re-run the trial to regenerate the row."
-                )
+        if isinstance(row.get("metric"), str):
+            raise BuildDbError(
+                f"{path.name} stores 'metric' as a string ({row['metric']!r}), but metrics must be numeric. "
+                f"Re-run the trial to regenerate the row."
+            )
         trials.append(
             Trial(
                 experiment=str(row["experiment"]),
@@ -142,7 +177,6 @@ def read_rows(rows_dir: Path) -> List[Trial]:
                 seed=int(row["seed"]),
                 rep=int(row["rep"]),
                 metric=float(row["metric"]),
-                metric_slide=float(row["metric_slide"]),
                 n_declared=int(row["n_declared"]),
                 n_test=int(row["n_test"]),
                 split_hash=str(row["split_hash"]),
@@ -184,7 +218,8 @@ def check_invariants(trials: Sequence[Trial]) -> List[str]:
     # A repeated training seed means two 'independent' runs are the same run.
     train_seeds = [t.train_seed for t in trials]
     if len(set(train_seeds)) != len(train_seeds):
-        seen, dupes = set(), set()
+        seen: set[int] = set()
+        dupes: set[int] = set()
         for t in trials:
             (dupes if t.train_seed in seen else seen).add(t.train_seed)
         raise BuildDbError(
@@ -195,7 +230,7 @@ def check_invariants(trials: Sequence[Trial]) -> List[str]:
     notes = []
     shas = {t.git_sha for t in trials}
     if len(shas) > 1:
-        counts = defaultdict(int)
+        counts: defaultdict[str, int] = defaultdict(int)
         for t in trials:
             counts[t.git_sha[:8]] += 1
         notes.append(
@@ -312,7 +347,7 @@ def margin_convergence(comparison: ResplitComparison, steps: int = 5) -> List[tu
 
 
 def summarize_arm(result: ArmResult, margin: float, delta_null: np.ndarray) -> Dict[str, float]:
-    """The reportable statistics for one arm. No p-value against zero, see COMPARE_SPEC section 6."""
+    """The reportable statistics for one arm. No p-value against zero, see ``COMPARE_SPEC.md`` §2.3."""
     real = result.delta_real
     return {
         "median": float(np.median(real)),
@@ -440,10 +475,9 @@ def _metric_figure(comparison: ResplitComparison, chance: float | None, path: Pa
     palette = ["#4c72b0", "#dd8452", "#55a868", "#c44e52", "#8172b3"]
     fig, axis = plt.subplots(figsize=(1.6 + 1.5 * len(arms) * len(REQUIRED_REPS), 4.4))
 
-    # Medians throughout, never means: the summary table quotes the median of this same quantity, and
-    # every other statistic in the report is a percentile (median delta, P95 margin). One centre
-    # statistic per report, so letting it vary by panel is not cosmetic, the mean-median gap can
-    # exceed the effects under discussion.
+    # Medians throughout: the summary table leads with the median of this same quantity, and the
+    # margin is a percentile (P95). The mean-median gap can exceed the effects under discussion, so
+    # every panel uses the same centre statistic.
     ticks, labels, seen = [], [], []
     for arm_idx, arm in enumerate(arms):
         color = palette[arm_idx % len(palette)]

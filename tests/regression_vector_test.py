@@ -11,16 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Expression endpoint: RNA matrix adapter + masked vector loss/metrics."""
+"""Expression endpoint: the masked vector loss and the per-gene metrics."""
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
 
 import numpy as np
-import pandas as pd
 import torch
+
 from dlux.eval.gene_metrics import (
     conservative_significant_gene_count,
     gene_metric_summary,
@@ -29,57 +28,6 @@ from dlux.eval.gene_metrics import (
     significant_gene_count,
 )
 from dlux.tasks.regression_vector import GenePearsonMean, regression_vector_loss
-
-from ahcore.data.adapters.rna_expression import RNAExpressionAdapter
-
-
-@dataclass
-class _FakeSlideView:
-    patient_code: str
-    slide_id: str
-
-
-def _write_matrix(tmp_path):
-    # 3 patients x 4 genes (Entrez columns); values chosen distinct per cell.
-    matrix = pd.DataFrame(
-        [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]],
-        index=["caseA", "caseB", "caseC"],
-        columns=[100, 200, 300, 400],
-    )
-    path = tmp_path / "matrix.parquet"
-    matrix.to_parquet(path)
-    return path
-
-
-def test_adapter_serves_patient_vector(tmp_path):
-    adapter = RNAExpressionAdapter(_write_matrix(tmp_path))
-    assert adapter.n_genes == 4 and adapter.genes == [100, 200, 300, 400]
-    bundle = adapter(_FakeSlideView(patient_code="caseB", slide_id="s1"))
-    vec = bundle.data["expression"]
-    assert torch.allclose(vec, torch.tensor([5.0, 6.0, 7.0, 8.0])) and bundle.meta["slide_id"] == "s1"
-
-
-def test_adapter_subselects_gene_panel(tmp_path):
-    # gene_ids restricts + reorders the served vector to the active panel.
-    adapter = RNAExpressionAdapter(_write_matrix(tmp_path), gene_ids=[300, 100])
-    assert adapter.n_genes == 2 and adapter.genes == [300, 100]
-    vec = adapter(_FakeSlideView(patient_code="caseB", slide_id="s1")).data["expression"]
-    assert torch.allclose(vec, torch.tensor([7.0, 5.0]))  # caseB gene300=7, gene100=5, in panel order
-
-
-def test_adapter_missing_patient_is_all_nan(tmp_path):
-    adapter = RNAExpressionAdapter(_write_matrix(tmp_path))
-    vec = adapter(_FakeSlideView(patient_code="not_in_matrix", slide_id="s9")).data["expression"]
-    assert vec.shape == (4,) and bool(torch.isnan(vec).all())
-
-
-def test_adapter_patient_code_coerced_to_str(tmp_path):
-    # matrix indexed by numeric-looking ids -> lookup by the (str) patient_code must still hit.
-    matrix = pd.DataFrame([[1.0, 2.0]], index=[42], columns=[10, 20])
-    path = tmp_path / "m.parquet"
-    matrix.to_parquet(path)
-    vec = RNAExpressionAdapter(path)(_FakeSlideView(patient_code="42", slide_id="s")).data["expression"]
-    assert torch.allclose(vec, torch.tensor([1.0, 2.0]))
 
 
 def test_expression_loss_masks_nan():

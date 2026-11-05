@@ -20,81 +20,36 @@ about how it is used, no split strategy, no DB location.
 A **study** composes cohorts by assigning each a **role** (``development`` /
 ``validation``) and holds the CV split parameters. The role determines the split
 strategy (``ROLE_STRATEGY``); the DB for a cohort in a study is written to
-``studies/<study>/db/<cohort>.db``.
+``studies/<study>/db/<cohort>/manifest.db``.
 
 The **contract** decouples a prediction target into three independent facets (see
 ``docs/specs/CONTRACT_SPEC.md``): ``source`` (modality + column + optional transform), ``objective``
 (head/loss/metrics/arity), ``stratify`` (fold balancing). The ``{type: ..., map: ...}``
-shorthand is kept as input sugar (``_expand_sugar``). Class weighting is not a facet: it is a
+shorthand is accepted as input sugar (``_expand_sugar``). Class weighting is not a facet: it is a
 training-time decision rather than a statement about the endpoint, so it lives on the task config.
 """
 
 from __future__ import annotations
 
-import math
-from dataclasses import dataclass
 from enum import Enum
 from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 # Image readers we accept for the WSI path (dlup ``ImageBackend`` member names).
-_VALID_IMAGE_READERS = {"FASTSLIDE", "FIMAGE", "OPENSLIDE", "TIFFFILE"}
+_VALID_IMAGE_READERS = {"FASTSLIDE", "FIMAGE", "OPENSLIDE", "SLIDESCORE", "TIFFFILE"}
 
 
-# -- objective + its resolution table ----------------------------------------
+# -- objective ----------------------------------------------------------------
 class Objective(str, Enum):
-    """What head/loss/metrics/arity a target uses, the single dispatch point."""
+    """What kind of target a field is. The tasks, the metrics and the reports each dispatch on it."""
 
     binary = "binary"  # 1 logit, BCE-with-logits, float{0,1}
     multiclass = "multiclass"  # K logits, softmax CE, long index
     regression = "regression"  # 1 output, MSE, float
     regression_vector = "regression_vector"  # N outputs (e.g. gene expression), MSE over the vector, float
     survival = "survival"  # (event, time) pair; n_bins hazard logits, discrete-time NLL, Harrell C-index
-    # segmentation = deferred (see CONTRACT_SPEC.md)
-
-
-@dataclass(frozen=True)
-class _ObjectiveSpec:
-    """Field-independent facts for an objective (the declaration locus).
-
-    ``num_outputs`` is not here. It needs the field's map for multiclass, so it is a
-    ``ContractField`` property. Metric names are tagged by consumer: ``stream`` = logged per epoch
-    (torchmetrics); ``report`` = full pooled/OOF set (sklearn, aggregate).
-    A metric may be in both (e.g. auroc)."""
-
-    target_dtype: str  # "float" | "long"
-    missing_sentinel: float  # -1 (categorical) | NaN (regression)
-    stream_metrics: tuple[str, ...]
-    report_metrics: tuple[str, ...]
-
-
-_BINARY_REPORT = (
-    "auroc",
-    "ap",
-    "accuracy",
-    "balanced_accuracy",
-    "sensitivity",
-    "specificity",
-    "precision",
-    "npv",
-    "f1",
-    "mcc",
-    "kappa",
-)
-
-OBJECTIVE_TABLE: dict[Objective, _ObjectiveSpec] = {
-    Objective.binary: _ObjectiveSpec("float", -1, ("auroc", "accuracy"), _BINARY_REPORT),
-    Objective.multiclass: _ObjectiveSpec("long", -1, ("accuracy", "auroc"), ("accuracy", "auroc")),
-    Objective.regression: _ObjectiveSpec("float", math.nan, ("mse", "mae"), ("mse", "mae", "rmse", "pearson", "r2")),
-    Objective.regression_vector: _ObjectiveSpec(
-        "float",
-        math.nan,
-        ("gene_pearson_mean",),  # per-gene Pearson, averaged across genes (logged per epoch)
-        ("gene_pearson_mean", "gene_pearson_topk", "gene_spearman_median"),  # aggregate report set
-    ),
-    Objective.survival: _ObjectiveSpec("float", math.nan, ("c_index",), ("c_index",)),
-}
+    # segmentation is a non-goal (see CONTRACT_SPEC.md §2.4)
 
 
 # -- transform + its binning -------------------------------------------------
@@ -152,7 +107,11 @@ class DiscretizeSpec(BaseModel):
 
     @property
     def num_classes(self) -> int:
-        return int(self.k) if self.method == StratifyMethod.quantile else len(self.edges) + 1
+        if self.method == StratifyMethod.quantile:
+            assert self.k is not None
+            return int(self.k)
+        assert self.edges is not None
+        return len(self.edges) + 1
 
 
 class Transform(BaseModel):
@@ -188,17 +147,7 @@ class Source(BaseModel):
     column: Optional[str] = None  # defaults to the contract key (injected at Cohort level); None for bulk_rna
     # survival only: the follow-up-time column (source.column names the event column). None otherwise.
     time_column: Optional[str] = None
-    # Granularity of a column label = which manifest table it lives in. Reserved: `image` (a distinct
-    # value per slide, e.g. a per-section measurement) needs image_labels ingestion + a per-image reader,
-    # which are not built, only `patient` is wired today. Drives storage by data granularity, not concept.
-    level: Literal["patient", "image"] = "patient"
     transform: Optional[Transform] = None
-
-    @model_validator(mode="after")
-    def _check_level(self) -> "Source":
-        if self.level == "image":
-            raise ValueError("source.level='image' is reserved but not implemented (no image_labels ingestion yet)")
-        return self
 
 
 class Stratify(BaseModel):
@@ -348,8 +297,11 @@ class ContractField(BaseModel):
         """Model head output count: 1 (binary/regression) or K (multiclass)."""
         if self.objective == Objective.multiclass:
             t = self.source.transform
-            assert t is not None and (t.categorical is not None or t.discretize is not None)
-            return t.discretize.num_classes if t.discretize is not None else len(set(t.categorical.values()))
+            assert t is not None
+            if t.discretize is not None:
+                return t.discretize.num_classes
+            assert t.categorical is not None
+            return len(set(t.categorical.values()))
         if self.objective == Objective.regression_vector:
             raise ValueError(
                 "regression_vector output count = the gene-panel size, resolved at train time (not the contract)"
@@ -366,21 +318,11 @@ class ContractField(BaseModel):
         declares, so the grouping is defined once instead of per subsystem."""
         return "bulk_rna" if self.source.modality == "bulk_rna" else "sheet"
 
-    def target_dtype(self) -> str:
-        return OBJECTIVE_TABLE[self.objective].target_dtype
-
-    def missing_sentinel(self) -> float:
-        return OBJECTIVE_TABLE[self.objective].missing_sentinel
-
-    def metric_names(self, kind: Literal["stream", "report"]) -> tuple[str, ...]:
-        spec = OBJECTIVE_TABLE[self.objective]
-        return spec.stream_metrics if kind == "stream" else spec.report_metrics
-
 
 # -- cohort (a data source: storage + contract, no splits, no DB location) ---
 class Storage(BaseModel):
     """Where this cohort's external data lives on disk. The DB location is not here. It is derived
-    from the study (``studies/<study>/db/<cohort>.db``), because the same cohort can be
+    from the study (``studies/<study>/db/<cohort>/manifest.db``), because the same cohort can be
     materialised differently under different studies."""
 
     model_config = ConfigDict(extra="forbid")
@@ -439,7 +381,6 @@ class SplitCategory:
 
 class SplitStrategy(str, Enum):
     nested_cv = "nested_cv"  # development: n_outer x n_inner nested CV, per label
-    simple = "simple"  # one fixed FIT/VALIDATE(/TEST) partition, per label
     all_test = "all_test"  # validation: single split, all patients TEST
     all_predict = "all_predict"  # unlabeled inference: single split, all patients PREDICT
 
@@ -453,8 +394,6 @@ class Splits(BaseModel):
     strategy: SplitStrategy
     n_outer: int = 5  # nested_cv
     n_inner: int = 5  # nested_cv
-    ratios: Optional[list[float]] = None  # simple: len 2 (fit/val) or 3 (fit/val/test)
-    per_label: bool = True  # generate splits per contract field over its valid subset
     random_state: int = 42
     # Study-required input modalities (e.g. ["rna"]): every field's splits are restricted to patients
     # who have all of them, so a fusion study's arms all train/score on one patient set (fair comparison).
@@ -463,11 +402,6 @@ class Splits(BaseModel):
 
     @model_validator(mode="after")
     def _check(self) -> "Splits":
-        if self.strategy == SplitStrategy.simple:
-            if not self.ratios or len(self.ratios) not in (2, 3):
-                raise ValueError("simple split requires 'ratios' of length 2 or 3")
-            if abs(sum(self.ratios) - 1.0) > 1e-6:
-                raise ValueError(f"simple split 'ratios' must sum to 1, got {sum(self.ratios)}")
         if self.strategy == SplitStrategy.nested_cv and (self.n_outer < 2 or self.n_inner < 1):
             raise ValueError("nested_cv requires n_outer >= 2 and n_inner >= 1")
         return self
@@ -478,7 +412,7 @@ class Role(str, Enum):
     """A cohort's function within a study, determines its split strategy (``ROLE_STRATEGY``)."""
 
     development = "development"  # trains the models (internal nested-CV)
-    validation = "validation"  # held-out cohort, scored by evaluate_external
+    validation = "validation"  # held-out cohort with no development patient, scored by evaluate_external
     predict = "predict"  # unlabeled inference target, run by bin/predict (all_predict, no labels)
 
 
@@ -496,15 +430,13 @@ class SplitParams(BaseModel):
 
     n_outer: int = 5
     n_inner: int = 5
-    ratios: Optional[list[float]] = None
-    per_label: bool = True
     random_state: int = 42
 
 
 class Study(BaseModel):
     """A named experiment: composes cohorts by role, owns the CV split parameters.
 
-    The DB for ``cohort`` in this study is written to ``studies/<name>/db/<cohort>.db``. Its split
+    The DB for ``cohort`` in this study is written to ``studies/<name>/db/<cohort>/manifest.db``. Its split
     strategy is ``ROLE_STRATEGY[role]`` composed with the study's ``splits`` params."""
 
     model_config = ConfigDict(extra="forbid")

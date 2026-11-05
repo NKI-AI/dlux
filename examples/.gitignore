@@ -1,4 +1,4 @@
-# Site-specific local config (real paths) — never committed, excluded from the public carve too.
+# Site-specific local config (real paths). Never committed.
 config/local/
 # Python caches.
 **/__pycache__/

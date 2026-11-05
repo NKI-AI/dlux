@@ -1,14 +1,13 @@
 # @package paths
 # Filesystem locations (layout A). Per-cohort DATA lives under cohorts/<cohort>/{sheets,rnaseq,cache};
-# per-study artifacts under studies/<study>/{<cohort>.db, runs, results}; tracking under tracking/.
-# Cohort INPUT roots (external raw images/masks) are per-cohort under the `cohorts` block below.
-root_dir: ???
+# per-study artifacts under studies/<study>/{db, runs, results, comparisons, resplits}; tracking under tracking/.
+root_dir: ${oc.env:DLUX_ROOT} # the output root; a site's config/local/paths may set it instead
 cohorts_dir: ${paths.root_dir}/cohorts # per-cohort data (sheets/rnaseq/cache); cache namespace nests here
-studies_dir: ${paths.root_dir}/studies # per-study artifacts (<cohort>.db, runs/, results/)
+studies_dir: ${paths.root_dir}/studies # per-study artifacts (db/, runs/, results/, comparisons/, resplits/)
 models_dir: ${paths.root_dir}/models
 log_dir: ${paths.root_dir}/tracking/logs # DISPOSABLE hydra run dirs (safe to clear)
 mlflow_dir: ${paths.root_dir}/tracking/mlflow # DURABLE mlflow tracking store (sqlite db + artifacts)
 
 # NOTE: cohort WSI/mask input roots are NOT here. A cohort belongs to the project that owns it, so
 # its `image_dir`/`mask_dir` come from that project's `config/project/paths/default.yaml`.
-# See dlux_notes/CONSUMER_SPEC.md.
+# See docs/specs/CONSUMER_SPEC.md §1.3.

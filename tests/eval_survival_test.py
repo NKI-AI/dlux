@@ -21,6 +21,7 @@ import json
 
 import numpy as np
 import pytest
+
 from dlux.eval.aggregate import aggregate_experiment, write_reports
 from dlux.eval.predictions import write_predictions_npz
 
@@ -45,7 +46,9 @@ def _write_survival_fold(runs_root, outer, patients, *, grid, inner=0):
         "time_edges": np.asarray([0.5, 1.5, 2.5]),  # 4 bins -> 3 interior cut points
     }
     write_predictions_npz(preds, d / "test_predictions.npz")
-    (d / "metadata.json").write_text(json.dumps({"n_outer": grid[0], "n_inner": grid[1]}))
+    (d / "metadata.json").write_text(
+        json.dumps({"n_outer": grid[0], "n_inner": grid[1], "test_coverage": {"declared": 0, "scored": 0, "lost": []}})
+    )
 
 
 def test_survival_routing_and_cindex(tmp_path):
@@ -69,7 +72,7 @@ def test_survival_write_reports(tmp_path):
     out = write_reports(results, "surv", tmp_path / "results")
     assert (out / "figures" / "km_pfi.png").exists()  # KM by risk, not ROC/scatter
     assert (out / "figures" / "c_index_by_fold.png").exists()  # survival per-fold strip
-    with (out / "predictions_pfi.csv").open() as f:
+    with (out / "per_patient_pfi.csv").open() as f:
         rows = list(csv.DictReader(f))
     assert len(rows) == 4 and {"risk", "time", "event"} <= set(rows[0].keys())
     md = (out / "summary.md").read_text()

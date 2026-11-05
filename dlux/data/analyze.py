@@ -15,8 +15,9 @@
 
 Reads the sqlite manifest directly (no ahcore dependency, so it is runnable
 standalone and testable) plus the ``Cohort`` contract, and emits a markdown
-summary + a single multi-panel overview figure. No config knobs beyond the
-dataset itself. Each field's raw values are read from its ``source.column``.
+summary plus figures: a combined overview, a dataset figure and one figure per
+endpoint. No config knobs beyond the dataset itself. Each field's raw values are
+read from its ``source.column``.
 """
 
 from __future__ import annotations
@@ -259,11 +260,9 @@ class _RegressionVectorRenderer:
         g = self._summary(ctx)
         genes = f" · {g['n_genes']} genes" if g else ""
         matrix_n = f" (matrix has {g['n_patients']})" if g else ""
-        # How many of this cohort's patients the matrix can label, a fact about the data, so the
-        # modality answers it by intersecting the matrix index with the manifest. Deriving it from the
-        # split table instead would report 0 for any cohort scored end-to-end (no CV splits to count),
-        # and would conflate "has RNA" with "entered a fold", patients can be dropped for slide
-        # reasons too. Fold membership is a splits fact and is reported under `## Splits`.
+        # How many of this cohort's patients the matrix can label. The modality answers it by
+        # intersecting the matrix index with the manifest. This counts patients with RNA, not patients
+        # in a fold. Fold membership is a splits fact and is reported under `## Splits`.
         have_rna = len(
             BulkRNA.coverage(
                 cohorts_dir=ctx.cohorts_dir,
@@ -295,10 +294,10 @@ class _RegressionVectorRenderer:
 
 
 class _SurvivalRenderer:
-    """Time-to-event endpoint (event, time). The discrete-time model uses the follow-up time (bin edges
-    are the fit-split event-time quantiles), so a violin of the 0/1 event bit is meaningless. It drops
-    the time axis entirely. This renders the cohort survival instead. Overview grid (one ax): single-arm
-    Kaplan-Meier. Standalone figure: KM + a follow-up-time histogram split by event vs censored."""
+    """Time-to-event endpoint (event, time), rendered as cohort survival. The discrete-time model uses
+    the follow-up time (bin edges are the fit-split event-time quantiles). Overview grid (one ax):
+    single-arm Kaplan-Meier. Standalone figure: KM + a follow-up-time histogram split by event vs
+    censored."""
 
     n_panels = 2
 
@@ -442,8 +441,8 @@ def _write_summary(
             plain_versions.append(version)
 
     for prefix, outer_reps in cv_prefixes.items():
-        field = cohort.contract.get(prefix)
-        header = _renderer(field).fold_balance_header(field) if field is not None else None
+        cv_field = cohort.contract.get(prefix)
+        header = _renderer(cv_field).fold_balance_header(cv_field) if cv_field is not None else None
         lines.append(f"### `{prefix}` — nested CV ({len(outer_reps)} outer folds; TEST shared across inner)")
         lines.append("")
         lines += (
@@ -457,7 +456,7 @@ def _write_summary(
             if header is None:
                 lines.append(f"| o{outer} | {len(test_ids)} |")
             else:
-                cell = _renderer(field).fold_balance_cell(field, test_ids, ctx)
+                cell = _renderer(cv_field).fold_balance_cell(cv_field, test_ids, ctx)
                 lines.append(f"| o{outer} | {len(test_ids)} | {cell} |")
         lines.append("")
 
@@ -551,7 +550,8 @@ def _plot_endpoint(name: str, field, ctx: "_Ctx", out_dir: Path) -> str:
 
 
 def analyze_db(cohort: Cohort, database_uri: str, out_dir: Path, cohorts_dir: Optional[Path] = None) -> Path:
-    """Write summary.md + overview.png for ``cohort``'s DB (at ``database_uri``) into ``out_dir``.
+    """Write summary.md, overview.png, dataset.png and one endpoint figure per endpoint for ``cohort``'s
+    DB (at ``database_uri``) into ``out_dir``.
 
     ``cohorts_dir`` is the cohort data root; renderers needing derived-artifact side-inputs (the
     expression rider's RNA matrix) resolve them from it. Analysis still runs without it, those

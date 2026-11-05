@@ -19,7 +19,7 @@ a value that silently does nothing.
 
 The task, not the cohort contract, is where a training-time choice about the target belongs: the
 contract states what an endpoint is and is consumed by ``build_db``, while these knobs are consumed
-only by a run. ``target_normalize`` already lived here; ``loss`` joins it.
+only by a run. ``target_normalize`` and ``loss`` are such knobs.
 """
 
 from __future__ import annotations

@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import pytest
+
 from dlux.data.masks import parse_seg_config
 
 _XML = """<?xml version="1.0"?>

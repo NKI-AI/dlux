@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import numpy as np
+
 from dlux.eval.score_dist import (
     binary_score_groups,
     ovr_score_groups,

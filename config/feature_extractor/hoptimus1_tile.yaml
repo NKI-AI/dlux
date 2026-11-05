@@ -1,0 +1,8 @@
+# @package feature_extractor
+# H-optimus-1 foundation model (frozen). Normalisation and feature dim are read from the .pack; model_name
+# names the feature cache. Produce the .pack (downloads gated weights) with:
+#   python -m ahcore.tools.fomo_pack \
+#     --output-dir <models_dir> --models bioptimus-H-optimus-1 --use-hf-login
+_target_: ahcore.feature_extractors.from_pack.PackFeatureExtractor
+pack_path: ${paths.models_dir}/bioptimus-H-optimus-1.pack
+model_name: hoptimus1

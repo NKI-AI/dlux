@@ -22,9 +22,9 @@ run:
   inner: null # a single inner replicate, or null to average every replicate present
 hydra:
   # A consumer project supplies its own `catalog/` (cohorts, studies, experiments) and `config/`
-  # (custom tasks/models + its cohort paths). Both are search-path roots. Paths are relative to the
-  # process working directory (the repo root); set
-  # DLUX_PROJECT to a consumer project root (it supplies catalog/ and config/).
+  # (custom tasks/models + its cohort paths). Both are search-path roots. DLUX_PROJECT names the
+  # project; `dlux.project` resolves a relative value from the repository root and fails if either
+  # root is missing.
   searchpath:
-    - file://${oc.env:DLUX_PROJECT,.}/catalog
-    - file://${oc.env:DLUX_PROJECT,.}/config
+    - file://${dlux.project:}/catalog
+    - file://${dlux.project:}/config

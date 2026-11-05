@@ -11,12 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""WSIBulkRNATask, predict a patient's bulk RNA-seq gene-expression vector from one precomputed
-slide-feature set (ABMIL, multi-output MSE).
+"""WSIBulkRNATask, predict a patient's bulk RNA-seq gene-expression vector from the declared input
+streams (multi-output MSE).
 
-Attention-MIL aggregates each slide's tile-feature bag into a G-dimensional prediction (head width =
+The input streams feed the configured model, which outputs a G-dimensional prediction (head width =
 the gene-panel size), trained with NaN-masked MSE. The target is the patient's raw RSEM vector (from
-the ``RNAExpressionAdapter``), transformed in the task: ``log1p`` then **per-gene z-score** using this
+the ``RNAExpressionAdapter``), transformed in the task: ``log1p`` then per-gene z-score using this
 fold's train-split per-gene μ/σ (leakage-clean, passed in) so every gene contributes comparably to the
 loss. Predictions are de-standardised back to log1p space for persistence/metrics. A separate task
 from WSIRegressionTask (scalar); both plug into the same LightningModule.
@@ -38,11 +38,12 @@ from ahcore.tasks.interfaces import TaskWithMetrics
 
 from dlux.config.cohort import ContractField, Objective, SplitCategory
 from dlux.modalities import BulkRNA
+from dlux.tasks.fit_state import FitState
 from dlux.tasks.regression_vector import build_gene_metrics, regression_vector_loss
 
 
 class WSIBulkRNATask(ConcreteTaskWithAdapters, TaskWithMetrics):
-    """Patient gene-expression vector from one precomputed slide-feature set (ABMIL, masked MSE)."""
+    """Patient gene-expression vector from the declared input streams (masked MSE)."""
 
     name = "wsi_bulk_rna"
 
@@ -64,7 +65,6 @@ class WSIBulkRNATask(ConcreteTaskWithAdapters, TaskWithMetrics):
             raise ValueError(
                 f"WSIBulkRNATask handles regression_vector (expression) only, got '{contract_field.objective.value}'."
             )
-        self._target = target
         self._data_description = data_description
         self.inputs = dict(inputs)
         self._rna = BulkRNA(  # RNA as the target here
@@ -129,13 +129,8 @@ class WSIBulkRNATask(ConcreteTaskWithAdapters, TaskWithMetrics):
 
     @property
     def num_classes(self) -> int:
-        """The ABMIL head outputs one value per gene (the panel size)."""
+        """The model head outputs one value per gene (the panel size)."""
         return self._rna.n_genes
 
-    @property
-    def gene_means(self) -> torch.Tensor:
-        return self._rna.gene_means
-
-    @property
-    def gene_stds(self) -> torch.Tensor:
-        return self._rna.gene_stds
+    def fit_state(self) -> FitState:
+        return FitState(pred_mean=self._rna.gene_means.numpy(), pred_std=self._rna.gene_stds.numpy())

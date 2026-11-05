@@ -11,35 +11,34 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Multiclass endpoint: macro/per-class metrics, its own vector-prob aggregation core, confusion +
-one-vs-rest ROC figures, per-patient CSV, headline, and both handlers, ``AGGREGATE_HANDLER`` (internal reporting) and
-``EXTERNAL_HANDLER`` (scoring a held-out cohort). Per-patient predictions are (K,) softmax vectors in both
-lanes; class = argmax, never a tuned threshold.
-Imports down from ``_common`` only; the core references the module-level ``AGGREGATE_HANDLER`` (resolved at
-call time) for its metric fn, so it never reaches up into the driver's registry. ``ExternalResult`` is
-referenced solely in annotations (TYPE_CHECKING), so external.py can import this module."""
+"""Multiclass endpoint: macro/per-class metrics, the ``finish`` hook that adds the pooled per-class table,
+confusion + one-vs-rest ROC figures, per-patient CSV, headline, and both handlers, ``AGGREGATE_HANDLER``
+(internal reporting) and ``EXTERNAL_HANDLER`` (scoring a held-out cohort). Per-patient predictions are (K,)
+softmax vectors in both lanes; class = argmax, never a tuned threshold.
+Imports down from ``_common`` only. ``ExternalResult`` is referenced only in annotations (TYPE_CHECKING), so
+external.py can import this module."""
 
 from __future__ import annotations
 
 import csv
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 import numpy as np
 from sklearn.metrics import cohen_kappa_score, roc_auc_score
 
-from dlux.config.cohort import Objective
+from dlux.data import layout
 from dlux.eval._common import (
     AggregateResult,
-    OuterFoldMetric,
+    LabelModel,
     PatientPrediction,
+    PatientTable,
     _agg_pyplot,
+    _class_index_labels,
     _EndpointHandler,
     _ExternalHandler,
     _fmt,
-    _mean_std_across_folds,
     confusion_figure,
-    load_fold_predictions,
 )
 from dlux.eval.score_dist import plot_multiclass_score_distribution
 
@@ -132,90 +131,26 @@ def multiclass_metrics(labels: np.ndarray, probs: np.ndarray, num_classes: int) 
     }
 
 
-def _aggregate_field_multiclass(field: str, outer_to_reps: Dict[int, List[tuple[int, Path]]]) -> AggregateResult:
-    """Multiclass aggregation: roll (N, K) softmax probs slide->patient (mean), ensemble inner
-    replicates (mean-of-probs), per-outer + pooled macro/per-class metrics. Parallels _aggregate_field
-    but carries per-class prob vectors (like the expression core) instead of a scalar positive prob."""
-    num_classes = 0
-    patient_preds: List[PatientPrediction] = []
-    per_outer: List[OuterFoldMetric] = []
-    inner_coverage: Dict[int, int] = {}
-    pooled_probs_list: List[np.ndarray] = []
-    pooled_labels_list: List[np.ndarray] = []
+def _multiclass_patient_prediction(
+    field: str, outer: int, code: str, pred: np.ndarray, label: float, n_replicates: int
+) -> PatientPrediction:
+    """The (K,) per-class probabilities and the class index. A multiclass patient has no single positive-class
+    probability."""
+    return PatientPrediction(field, outer, code, float("nan"), int(label), n_replicates, ensemble_probs=pred)
 
-    for outer in sorted(outer_to_reps):
-        reps = sorted(outer_to_reps[outer])
-        per_patient_probs: Dict[str, List[np.ndarray]] = {}
-        per_patient_label: Dict[str, int] = {}
-        replicate_patient_sets: List[set] = []
 
-        for _inner, npz in reps:
-            data = load_fold_predictions(npz)
-            probs = data["probs"]  # (N, K)
-            if probs.ndim != 2:
-                raise ValueError(f"multiclass fold {npz} has {probs.ndim}-D probs; expected 2-D (N, K).")
-            num_classes = num_classes or probs.shape[1]
-            slide_probs: Dict[str, List[np.ndarray]] = {}
-            label_by_pc: Dict[str, int] = {}
-            for pc, prob_vec, lbl in zip(data["patient_codes"], probs, data["labels"]):
-                pc = str(pc)
-                slide_probs.setdefault(pc, []).append(np.asarray(prob_vec, dtype=np.float64))
-                label_by_pc[pc] = int(round(float(lbl)))  # loaded as float64; class index
-            rolled = {pc: np.mean(v, axis=0) for pc, v in slide_probs.items()}  # slide -> patient mean
-            replicate_patient_sets.append(set(rolled))
-            for pc, vec in rolled.items():
-                per_patient_probs.setdefault(pc, []).append(vec)
-                per_patient_label[pc] = label_by_pc[pc]
+def _finish_multiclass(result: AggregateResult, table: PatientTable, random_table: Optional[PatientTable]) -> None:
+    """The class count and the pooled per-class one-vs-rest table."""
+    num_classes = int(table.preds.shape[1])
+    result.num_classes = num_classes
+    result.pooled_per_class = multiclass_per_class(_class_index_labels(table.labels), table.preds, num_classes)
 
-        # shared-TEST invariant: every inner replicate of an outer fold covers the same patients.
-        first = replicate_patient_sets[0]
-        for other in replicate_patient_sets[1:]:
-            if other != first:
-                raise ValueError(
-                    f"shared-TEST invariant violated for field '{field}' outer fold {outer}: "
-                    f"inner replicates cover different patient sets (symmetric diff: {sorted(first ^ other)})"
-                )
 
-        inner_coverage[outer] = len(reps)
-        pcs = sorted(per_patient_probs)
-        probs_o = np.stack([np.mean(per_patient_probs[pc], axis=0) for pc in pcs])  # (N_o, K) ensembled
-        labels_o = np.asarray([per_patient_label[pc] for pc in pcs], dtype=np.int64)
-        per_outer.append(
-            OuterFoldMetric(field, outer, len(pcs), 0, AGGREGATE_HANDLER.metrics(labels_o, probs_o, num_classes))
-        )
-        for i, pc in enumerate(pcs):
-            patient_preds.append(
-                PatientPrediction(
-                    field,
-                    outer,
-                    pc,
-                    float("nan"),
-                    int(labels_o[i]),
-                    len(per_patient_probs[pc]),
-                    ensemble_probs=probs_o[i],
-                )
-            )
-        pooled_probs_list.append(probs_o)
-        pooled_labels_list.append(labels_o)
-
-    pooled_probs = np.concatenate(pooled_probs_list)
-    pooled_labels = np.concatenate(pooled_labels_list)
-    mean, std = _mean_std_across_folds(per_outer, AGGREGATE_HANDLER)
-    return AggregateResult(
-        field=field,
-        endpoint_type=Objective.multiclass,
-        patient_predictions=patient_preds,
-        per_outer=per_outer,
-        mean=mean,
-        std=std,
-        pooled=AGGREGATE_HANDLER.metrics(pooled_labels, pooled_probs, num_classes),
-        pooled_n=int(pooled_labels.size),
-        pooled_positive=0,  # no single positive class in multiclass
-        n_outer_folds=len(inner_coverage),
-        inner_coverage=inner_coverage,
-        num_classes=num_classes,
-        pooled_per_class=multiclass_per_class(pooled_labels, pooled_probs, num_classes),
-    )
+def _predicted_class(p: PatientPrediction) -> int:
+    """The argmax class of a multiclass prediction, whose per-class probabilities the aggregate sets."""
+    if p.ensemble_probs is None:
+        raise ValueError(f"patient {p.patient_code} has no per-class probabilities to take an argmax over")
+    return int(np.argmax(p.ensemble_probs))
 
 
 def _per_class_table(rows: List[dict], caption: str) -> List[str]:
@@ -240,6 +175,8 @@ def _per_class_table(rows: List[dict], caption: str) -> List[str]:
 
 def _multiclass_summary_extra(res: AggregateResult) -> List[str]:
     """Per-class pooled-OOF table under a multiclass endpoint's macro table: AUROC/precision/recall/F1/support."""
+    if res.pooled_per_class is None:
+        return []
     return _per_class_table(
         res.pooled_per_class, "Per-class (pooled OOF, one-vs-rest; class index = contract map order):"
     )
@@ -303,8 +240,8 @@ def _plot_ovr_roc(res: AggregateResult, path: Path) -> None:
 
 def _plot_confusion(res: AggregateResult, path: Path) -> None:
     """Pooled-OOF confusion matrix for a multiclass aggregate result (argmax over the ensembled probs)."""
-    labels = [int(p.label) for p in res.patient_predictions]
-    preds = [int(np.argmax(p.ensemble_probs)) for p in res.patient_predictions]
+    labels = np.asarray([int(p.label) for p in res.patient_predictions])
+    preds = np.asarray([_predicted_class(p) for p in res.patient_predictions])
     confusion_figure(
         labels, preds, res.num_classes or 0, f"{res.field}: confusion (pooled OOF, {res.pooled_n} patients)", path
     )
@@ -320,7 +257,7 @@ def _artifacts_multiclass(res: AggregateResult, out_dir: Path, figures_dir: Path
         path=figures_dir / f"score_dist_{res.field}.png",
         num_classes=res.num_classes or 0,
     )
-    _write_multiclass_predictions_csv(res, out_dir / f"predictions_{res.field}.csv")
+    _write_multiclass_predictions_csv(res, layout.per_patient_csv(out_dir, res.field))
 
 
 def _headline_multiclass(res: AggregateResult) -> str:
@@ -331,16 +268,22 @@ def _headline_multiclass(res: AggregateResult) -> str:
     )
 
 
-AGGREGATE_HANDLER = _EndpointHandler(
+MODEL = LabelModel(
     MULTICLASS_METRIC_LABELS,
+    lambda labels, values, k: multiclass_metrics(labels, values, k),
+    has_positive_count=False,  # "positive" is binary-only; K classes have no single positive count
+    vector_preds=True,  # per-patient prediction is a (K,) softmax vector, not a scalar
+)
+
+AGGREGATE_HANDLER = _EndpointHandler(
+    MODEL,
     _MULTICLASS_FOOTER,
-    False,
     _artifacts_multiclass,
     _headline_multiclass,
-    metrics=lambda labels, values, k: multiclass_metrics(labels, values, k),
-    patient_row=lambda p: (int(np.argmax(p.ensemble_probs)), int(p.label)),
     strip_group="classification",
     summary_extra=_multiclass_summary_extra,
+    patient_prediction=_multiclass_patient_prediction,
+    finish=_finish_multiclass,
 )
 
 
@@ -359,7 +302,7 @@ def _write_external_multiclass_patient_csv(results: List["ExternalResult"], out_
     ``grand``, the same long shape as binary's, so the figures stay reconstructable from disk."""
     for res in results:
         k = res.num_classes or 0
-        with (out_dir / f"per_patient_external_{res.field}.csv").open("w", newline="") as f:
+        with layout.per_patient_csv(out_dir, res.field).open("w", newline="") as f:
             w = csv.writer(f)
             w.writerow(["patient_code", "model", *[f"prob_{c}" for c in range(k)], "pred", "label"])
             for p in sorted(res.labels):
@@ -410,10 +353,7 @@ def _multiclass_section_extra(result: "ExternalResult") -> List[str]:
 
 
 EXTERNAL_HANDLER = _ExternalHandler(
-    MULTICLASS_METRIC_LABELS,
-    lambda labels, values, k: multiclass_metrics(labels, values, k),
-    vector_probs=True,  # per-patient prediction is a (K,) softmax vector, not a scalar
-    has_positive_count=False,  # "positive" is binary-only; K classes have no single positive count
+    MODEL,
     write_patient_csv=_write_external_multiclass_patient_csv,
     write_artifact=_plot_external_figures,
     section_extra=_multiclass_section_extra,

@@ -13,7 +13,7 @@
 # limitations under the License.
 """Binary endpoint: metric labels + fn, ROC figures, headline, and the two handlers the drivers
 assemble into their registries (``AGGREGATE_HANDLER`` for internal reporting, ``EXTERNAL_HANDLER`` for
-external scoring, binary is the only externally-scorable objective wired today).
+external scoring).
 
 Imports down from ``_common`` only; ``ExternalResult`` is referenced solely in annotations (TYPE_CHECKING)
 so this module never takes a runtime edge to the ``external`` driver."""
@@ -28,7 +28,15 @@ from typing import TYPE_CHECKING, Dict, List
 import numpy as np
 from sklearn.metrics import average_precision_score, roc_auc_score
 
-from dlux.eval._common import AggregateResult, _agg_pyplot, _EndpointHandler, _ExternalHandler
+from dlux.data import layout
+from dlux.eval._common import (
+    AggregateResult,
+    LabelModel,
+    _agg_pyplot,
+    _EndpointHandler,
+    _ExternalHandler,
+    write_scalar_patient_csv,
+)
 from dlux.eval.score_dist import plot_binary_score_distribution
 
 if TYPE_CHECKING:
@@ -36,7 +44,7 @@ if TYPE_CHECKING:
 
 _THRESHOLD = 0.5
 
-# Ordered metric keys → column labels for the summary table (also reused by external's binary handler).
+# Ordered metric keys → column labels for the summary table, shared by both binary handlers through ``MODEL``.
 BINARY_METRIC_LABELS: Dict[str, str] = {
     "auroc": "AUROC",
     "ap": "AP",
@@ -52,7 +60,7 @@ BINARY_METRIC_LABELS: Dict[str, str] = {
 }
 
 _BINARY_FOOTER = (
-    "_Thresholded metrics (acc, bal\\_acc, sens, spec, prec, F1) at a FIXED threshold 0.5 — not tuned "
+    "_Thresholded metrics (acc, bal\\_acc, sens, spec, prec, NPV, F1, MCC, κ) at a FIXED threshold 0.5 — not tuned "
     "(tuning on the held-out folds would leak). AUROC/AP are threshold-free. mean±std is across outer "
     "folds; pooled OOF is computed on all out-of-fold patients._"
 )
@@ -111,7 +119,7 @@ def _plot_roc(result: AggregateResult, path: Path) -> None:
     for p in result.patient_predictions:
         probs, labels = by_outer.setdefault(p.outer_fold, ([], []))
         probs.append(p.ensemble_prob)
-        labels.append(p.label)
+        labels.append(int(p.label))
 
     fig, ax = plt.subplots(figsize=(5.5, 5.0))
     interp_tprs: List[np.ndarray] = []
@@ -148,6 +156,7 @@ def _plot_roc(result: AggregateResult, path: Path) -> None:
 
 
 def _artifacts_binary(res: AggregateResult, out_dir: Path, figures_dir: Path) -> None:
+    write_scalar_patient_csv(res, layout.per_patient_csv(out_dir, res.field), label_cast=int)
     _plot_roc(res, figures_dir / f"roc_{res.field}.png")
     plot_binary_score_distribution(
         [p.ensemble_prob for p in res.patient_predictions],
@@ -167,18 +176,16 @@ def _headline_binary(res: AggregateResult) -> str:
 
 # -- external scoring --------------------------------------------------------
 def _write_external_binary_patient_csv(results: List[ExternalResult], out_dir: Path) -> None:
-    """Long-format per-patient probs across the binary endpoints: one row per (field × patient × model),
-    model = each outer-fold ensemble (o0…oK) plus grand, figures reconstructable from disk."""
-    with (out_dir / "per_patient_external.csv").open("w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["field", "patient_code", "model", "prob", "label"])
-        for res in results:
+    """One CSV per field, for people: one row per (patient × model), model = each outer-fold ensemble
+    (o0…oK) plus grand."""
+    for res in results:
+        with layout.per_patient_csv(out_dir, res.field).open("w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["patient_code", "model", "prob", "label"])
             for p in sorted(res.labels):
                 for o in res.outer_folds:
-                    w.writerow(
-                        [res.field, p, f"o{o}", f"{float(res.per_outer_patient_probs[o][p]):.6f}", res.labels[p]]
-                    )
-                w.writerow([res.field, p, "grand", f"{float(res.grand_patient_probs[p]):.6f}", res.labels[p]])
+                    w.writerow([p, f"o{o}", f"{float(res.per_outer_patient_probs[o][p]):.6f}", res.labels[p]])
+                w.writerow([p, "grand", f"{float(res.grand_patient_probs[p]):.6f}", res.labels[p]])
 
 
 def _plot_external_roc(result: ExternalResult, figures_dir: Path) -> None:
@@ -231,22 +238,22 @@ def _artifacts_external_binary(result: ExternalResult, figures_dir: Path) -> Non
 
 
 # -- registry entries assembled by the drivers -------------------------------
-AGGREGATE_HANDLER = _EndpointHandler(
+MODEL = LabelModel(
     BINARY_METRIC_LABELS,
+    lambda labels, values, k: binary_metrics(labels, values),
+    has_positive_count=True,
+)
+
+AGGREGATE_HANDLER = _EndpointHandler(
+    MODEL,
     _BINARY_FOOTER,
-    True,
     _artifacts_binary,
     _headline_binary,
-    metrics=lambda labels, values, k: binary_metrics(labels, values),
-    patient_row=lambda p: (f"{p.ensemble_prob:.6f}", int(p.label)),
     strip_group="classification",
 )
 
 EXTERNAL_HANDLER = _ExternalHandler(
-    BINARY_METRIC_LABELS,
-    lambda labels, values, k: binary_metrics(labels, values),
-    vector_probs=False,
-    has_positive_count=True,
+    MODEL,
     write_patient_csv=_write_external_binary_patient_csv,
     write_artifact=_artifacts_external_binary,
 )

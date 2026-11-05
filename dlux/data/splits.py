@@ -17,7 +17,7 @@ Given a ``Cohort`` and per-patient raw column values, produce named split versio
 (``SplitVersion``) with per-patient category assignments. ``build_db`` turns these into
 ahcore ``SplitDefinitions`` + ``Split`` rows.
 
-Stratification is resolved here and only here (contract seam #4): the fold-balance variable
+Stratification is resolved here and only here: the fold-balance variable
 defaults to the modeled target (class index / binarized value / binned regression target),
 or an overriding ``stratify.column``. Continuous binning goes through the shared
 ``bin_continuous``, the same math target ``binarize`` uses (binarize is the k=2 case).
@@ -29,6 +29,7 @@ import csv
 import hashlib
 import math
 import re
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -80,8 +81,8 @@ def format_all_predict() -> str:
 
 def format_all_test(field: str) -> str:
     """Whole-cohort TEST split: ``all_test_{field}``. The other split-version family, what a cohort
-    scored end-to-end gets instead of nested-CV folds. Named here rather than inline at each use so
-    both families are constructed here."""
+    scored end-to-end gets instead of nested-CV folds. Both split-version families are constructed in
+    this module."""
     return f"all_test_{field}"
 
 
@@ -96,9 +97,9 @@ class SplitVersion:
 def continuous_cuts(
     values, *, method: StratifyMethod, k: Optional[int] = None, edges: Optional[list[float]] = None
 ) -> list[float]:
-    """The interior cut points for a binning. Factored out so build-db can record them as fold-invariant
-    provenance (binarize threshold / discretize edges) and the target transform can replay the exact same
-    cut in every fold, not just the bin indices ``bin_continuous`` returns."""
+    """The interior cut points for a binning, separate from ``bin_continuous`` so build-db can record them
+    as fold-invariant provenance (binarize threshold / discretize edges) and the target transform can
+    restore the exact same cut in every fold, not just the bin indices ``bin_continuous`` returns."""
     arr = np.asarray(values, dtype=float)
     if method == StratifyMethod.median:
         return [float(np.median(arr))]
@@ -121,6 +122,7 @@ def bin_continuous(values, *, method: StratifyMethod, k: Optional[int] = None, e
 def _binarize_strata(values: list[float], binarize: BinarizeSpec) -> list[int]:
     """Target binarize -> {0,1}: the k=2 case of bin_continuous."""
     if binarize.method == StratifyMethod.threshold:
+        assert binarize.value is not None
         return bin_continuous(values, method=StratifyMethod.threshold, edges=[binarize.value])
     if binarize.method == StratifyMethod.quantile:
         return bin_continuous(values, method=StratifyMethod.quantile, k=2)
@@ -153,7 +155,8 @@ def _valid_patients_and_strata(
     distinct raw values)."""
     t = field.source.transform
     col = field.source.column
-    is_categorical = t is not None and t.categorical is not None
+    assert col is not None
+    categorical = t.categorical if t is not None else None
 
     codes: list[str] = []
     raw_targets: list = []  # raw str (categorical) | float (binarize / regression)
@@ -161,8 +164,8 @@ def _valid_patients_and_strata(
         raw = row.get(col)
         if raw is None or raw == "":
             continue
-        if is_categorical:
-            if raw in t.categorical:
+        if categorical is not None:
+            if raw in categorical:
                 codes.append(code)
                 raw_targets.append(raw)
         else:
@@ -184,14 +187,14 @@ def _valid_patients_and_strata(
             strata = bin_continuous(
                 [_parse_float(v) for v in col_raw], method=strat.method, k=strat.k, edges=strat.edges
             )
-    elif is_categorical:
-        strata = [t.categorical[v] for v in raw_targets]
+    elif categorical is not None:
+        strata = [categorical[v] for v in raw_targets]
     elif t is not None and t.binarize is not None:
         strata = _binarize_strata(raw_targets, t.binarize)
     elif t is not None and t.discretize is not None:
         strata = _discretize_strata(raw_targets, t.discretize)
     else:  # regression: bin the target by the stratify method (median default)
-        strata = bin_continuous(raw_targets, method=strat.method, k=strat.k, edges=strat.edges)
+        strata = bin_continuous(raw_targets, method=strat.method or StratifyMethod.median, k=strat.k, edges=strat.edges)
     return codes, strata
 
 
@@ -204,9 +207,8 @@ def draw_split(
 ) -> dict[str, list[str]]:
     """One patient-level stratified FIT/VALIDATE(/TEST) draw -> ``{stage: [patient_code]}``.
 
-    Deterministic in ``(codes, strata, ratios, seed)`` and pure. Shared by the ``simple`` split strategy
-    and the resplit trials, so both build a partition the same way. Splits at patient level. Slide-level
-    would leak a patient across stages.
+    Deterministic in ``(codes, strata, ratios, seed)`` and pure. The resplit trials draw their partitions
+    with it. Splits at patient level. Slide-level would leak a patient across stages.
     """
     if len(ratios) == 2:
         train, val = train_test_split(codes, test_size=ratios[1], random_state=seed, stratify=strata)
@@ -231,15 +233,6 @@ def split_hash(drawn: dict[str, list[str]]) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
-_STAGE_CATEGORY = {"fit": FIT, "validate": VALIDATE, "test": TEST}
-
-
-def _simple_split(field_name: str, codes: list[str], strata: list[int], splits) -> SplitVersion:
-    drawn = draw_split(codes, strata, ratios=splits.ratios, seed=splits.random_state)
-    assignments = [(c, _STAGE_CATEGORY[stage]) for stage, members in drawn.items() for c in members]
-    return SplitVersion(field_name, f"simple split ({field_name})", assignments)
-
-
 def _nested_cv_splits(field_name: str, codes: list[str], strata: Optional[list[int]], splits) -> list[SplitVersion]:
     """Nested KFold: {field}_cv_o{k}_i{j}, TEST_k shared across inner j. Stratified when ``strata`` is
     given (categorical/binned target); plain KFold when None (regression_vector, a vector target has
@@ -255,7 +248,7 @@ def _nested_cv_splits(field_name: str, codes: list[str], strata: Optional[list[i
     outer_iter = outer.split(codes, strata) if stratified else outer.split(codes)
     for k, (pool_idx, test_idx) in enumerate(outer_iter):
         pool = [codes[i] for i in pool_idx]
-        pool_strata = [strata[i] for i in pool_idx] if stratified else None
+        pool_strata = [strata[i] for i in pool_idx] if strata is not None else None
         test = [codes[i] for i in test_idx]  # computed once per outer k -> shared-TEST invariant is automatic
         inner = (
             StratifiedKFold(n_splits=n_inner, shuffle=True, random_state=seed + 1 + k)
@@ -284,6 +277,7 @@ def _survival_codes_and_strata(
     indicator (0/1) and a positive follow-up time. The stratum is the event indicator, so each fold
     carries a comparable observed-event rate (censored patients are kept, not dropped)."""
     event_col, time_col = field.source.column, field.source.time_column
+    assert event_col is not None and time_col is not None
     codes: list[str] = []
     strata: list[int] = []
     for code, row in patient_labels.items():
@@ -322,6 +316,49 @@ def field_codes_and_strata(
     return codes, strata
 
 
+def unusable_values(field: ContractField, patient_labels: dict[str, dict[str, str]]) -> dict[str, Counter[str]]:
+    """Per source column, each distinct non-empty value that makes a patient invalid for ``field``, with how
+    many patients carry it. An empty cell is missing, not unusable. A ``regression_vector`` field reads no
+    patients-sheet column and has none."""
+    if field.objective == Objective.regression_vector:
+        return {}
+    if field.objective == Objective.survival:
+        event_col, time_col = field.source.column, field.source.time_column
+        assert event_col is not None and time_col is not None
+        checks = {
+            event_col: lambda raw: _parse_float(raw) in (0.0, 1.0),
+            time_col: lambda raw: (t := _parse_float(raw)) is not None and t > 0.0,
+        }
+    else:
+        col = field.source.column
+        assert col is not None
+        categorical = field.source.transform.categorical if field.source.transform is not None else None
+        if categorical is not None:
+            checks = {col: lambda raw: raw in categorical}
+        else:
+            checks = {col: lambda raw: _parse_float(raw) is not None}
+    unusable: dict[str, Counter[str]] = {}
+    for column, usable in checks.items():
+        bad = Counter(
+            str(raw)
+            for row in patient_labels.values()
+            if (raw := row.get(column)) not in (None, "") and not usable(raw)
+        )
+        if bad:
+            unusable[column] = bad
+    return unusable
+
+
+def _report_unusable(cohort: Cohort, patient_labels: dict[str, dict[str, str]]) -> None:
+    for field_name, field in cohort.contract.items():
+        for column, bad in unusable_values(field, patient_labels).items():
+            values = ", ".join(f"{value!r} x{n}" for value, n in sorted(bad.items()))
+            print(
+                f"[splits] '{field_name}': {sum(bad.values())} patient(s) left out for an unusable value in "
+                f"column '{column}': {values}"
+            )
+
+
 def generate_splits(
     cohort: Cohort,
     patient_labels: dict[str, dict[str, str]],
@@ -349,6 +386,8 @@ def generate_splits(
             )
         ]
 
+    _report_unusable(cohort, patient_labels)
+
     # all_test is external validation, labels exist, so filter to each field's valid-value patients
     # up front (one `all_test_<field>` split each), exactly like the internal per-endpoint strategies.
     # This keeps missing-label patients out of inference entirely, rather than scoring then discarding.
@@ -375,9 +414,7 @@ def generate_splits(
         if not codes:
             print(f"[splits] no valid patients for '{field_name}', skipping")
             continue
-        if splits.strategy == SplitStrategy.simple:
-            versions.append(_simple_split(field_name, codes, strata, splits))
-        elif splits.strategy == SplitStrategy.nested_cv:
+        if splits.strategy == SplitStrategy.nested_cv:
             versions.extend(_nested_cv_splits(field_name, codes, strata, splits))
     return versions
 
@@ -390,7 +427,6 @@ _IMPORT_HEADER = ["patient_id", "split_version", "category"]
 _VALID_CATEGORIES = {FIT, VALIDATE, TEST, PREDICT}
 _STRATEGY_CATEGORIES = {
     SplitStrategy.nested_cv: {FIT, VALIDATE, TEST},
-    SplitStrategy.simple: {FIT, VALIDATE, TEST},
     SplitStrategy.all_test: {TEST},
     SplitStrategy.all_predict: {PREDICT},
 }
@@ -445,8 +481,6 @@ def expected_version_names(active_fields: list[str], splits: Splits) -> set[str]
         return {format_all_predict()}
     if splits.strategy == SplitStrategy.all_test:
         return {format_all_test(f) for f in active_fields}
-    if splits.strategy == SplitStrategy.simple:
-        return set(active_fields)
     return {
         format_cv_split(f, k, j) for f in active_fields for k in range(splits.n_outer) for j in range(splits.n_inner)
     }
@@ -461,8 +495,6 @@ def _version_field(version: str, active_fields: list[str]) -> Optional[str]:
         return version[len("all_test_") :]
     if version == format_all_predict():
         return None
-    if version in active_fields:  # simple: the version IS the field name
-        return version
     return None
 
 
@@ -495,9 +527,11 @@ def validate_imported_splits(
     Raises ``ValueError`` on: a version-name set that differs from what the study expects; a version whose
     category set is wrong for the strategy; and, by default, either side of a cohort/import mismatch (a
     file patient absent from the cohort, or a labelled cohort patient absent from the file), which catches
-    a truncated or wrong file. ``allow_uncovered`` is the matched cross-cohort case where the import and
-    the cohort legitimately meet only at their intersection: it downgrades both mismatches to a reported
-    drop, file-only patients are dropped from the returned versions, cohort-only patients from the folds."""
+    a truncated or wrong file. A cohort patient that a field's versions assign but that has no valid label
+    for that field, or lacks a required modality, is refused the same way, because a generated split never
+    holds one. ``allow_uncovered`` is the matched cross-cohort case where the import and the cohort
+    legitimately meet only at their intersection: it downgrades every mismatch to a reported drop. File-only
+    and invalid patients are dropped from the returned versions, cohort-only patients from the folds."""
     active_fields = [f for f, codes in valid_by_field.items() if codes]
 
     expected = expected_version_names(active_fields, splits)
@@ -525,6 +559,39 @@ def validate_imported_splits(
         drop = set(unknown)
         versions = [
             SplitVersion(v.version, v.description, [(c, cat) for c, cat in v.assignments if c not in drop])
+            for v in versions
+        ]
+
+    invalid: dict[str, set[str]] = {}
+    for v in versions:
+        field = _version_field(v.version, active_fields)
+        if field is not None:
+            invalid.setdefault(field, set()).update(
+                code for code, _ in v.assignments if code not in valid_by_field.get(field, set())
+            )
+    invalid = {field: codes for field, codes in invalid.items() if codes}
+    for field, codes in sorted(invalid.items()):
+        if not allow_uncovered:
+            raise ValueError(
+                f"imported splits assign {len(codes)} patient(s) to the '{field}' folds that have no valid "
+                f"'{field}' label or lack a required modality (e.g. {sorted(codes)[:8]}). Pass "
+                "splits.allow_uncovered=true to drop them (matched-intersection case), or fix the file."
+            )
+        print(
+            f"[splits] import: {len(codes)} patient(s) without a valid '{field}' label or a required modality "
+            f"→ dropped from the '{field}' folds (allow_uncovered)."
+        )
+    if invalid:
+        versions = [
+            SplitVersion(
+                v.version,
+                v.description,
+                [
+                    (c, cat)
+                    for c, cat in v.assignments
+                    if c not in invalid.get(_version_field(v.version, active_fields) or "", set())
+                ],
+            )
             for v in versions
         ]
 

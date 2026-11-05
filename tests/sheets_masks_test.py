@@ -16,8 +16,9 @@
 from __future__ import annotations
 
 import pytest
+
 from dlux.data.errors import BuildDbError
-from dlux.data.sheets import MASK_PATH, RESERVED_SLIDE_COLUMNS, read_masks
+from dlux.data.sheets import read_masks
 
 
 def _write(path, text):
@@ -63,8 +64,3 @@ def test_mask_for_an_unknown_slide_is_refused(tmp_path):
     with pytest.raises(BuildDbError, match="absent from slides.csv"):
         read_masks(sheet, known_slides={"kept.svs"})
     assert read_masks(sheet) == {"gone.svs": "gone.tiff"}  # unchecked without the slide set
-
-
-def test_mask_path_is_no_longer_a_slides_column():
-    # slides.csv describes the slide; the mask is derived data and lives in its own sheet.
-    assert MASK_PATH not in RESERVED_SLIDE_COLUMNS

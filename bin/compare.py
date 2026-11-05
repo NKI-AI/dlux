@@ -18,12 +18,10 @@
 
 A comparison is a named, study-scoped config naming the arms and the reference. It has the same shape
 as an experiment, so it re-runs as an artifact. Output is written to
-``studies/<study>/comparisons/<comparison_name>/``.
+``studies/<study>/comparisons/<comparison_name>/nested_cv/``.
 
-Reads only what ``aggregate`` persisted under ``results/<arm>/<cohort>/``: the ensemble table for
-binary and regression, ``predictions_<field>.csv`` for multiclass and survival (whose metrics need the
-class probabilities and event indicator the ensemble table drops). No model is loaded and no run
-re-executed, so an un-aggregated arm does not appear here.
+Reads only the ``per_patient_<field>.npz`` that ``aggregate`` persisted under ``results/<arm>/<cohort>/``.
+No model is loaded and no run re-executed, so an un-aggregated arm does not appear here.
 
 Arms that scored different patients are compared on the patients they share, with per-arm coverage
 reported alongside, so a difference in reach stays visible.
@@ -32,34 +30,24 @@ reported alongside, so a difference in reach stays visible.
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 
 import hydra
-from dlux.config.cohort import Cohort, Study
-from dlux.data.errors import BuildDbError
-from dlux.eval.compare import compare_arms, resolve_metric, write_comparison
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 from pydantic import ValidationError
 
 from ahcore.utils.io import get_logger, print_config
 
+from dlux.config.cohort import Cohort, Study
+from dlux.config.resolvers import register_resolvers
+from dlux.data import layout
+from dlux.data.errors import BuildDbError
+from dlux.eval.compare import check_comparison_choice, compare_arms, resolve_metric, write_comparison
+
 logger = get_logger(__name__)
 
 
-def _check_comparison_choice(choice: str, comparison_name: str, study_name: str) -> None:
-    """The config's folder must be the study and its leaf must be ``comparison_name``.
-
-    Same guard the experiment configs carry: the output directory is named from ``comparison_name``,
-    so a mismatch silently writes one comparison over another.
-    """
-    parent, _, leaf = str(choice).rpartition("/")
-    if not parent:
-        sys.exit(f"\n[compare] comparison must be study-scoped: comparison=<study>/<name>, got '{choice}'.")
-    if parent != study_name:
-        sys.exit(f"\n[compare] comparison '{choice}' belongs to study '{parent}', but study={study_name}.")
-    if leaf != comparison_name:
-        sys.exit(f"\n[compare] comparison '{choice}' sets comparison_name='{comparison_name}'; expected '{leaf}'.")
+register_resolvers()
 
 
 @hydra.main(version_base=None, config_path="../config", config_name="compare")
@@ -77,19 +65,22 @@ def main(cfg: DictConfig) -> None:
         )
 
     comparison_name = str(cfg.comparison_name)
-    _check_comparison_choice(HydraConfig.get().runtime.choices["comparison"], comparison_name, study.name)
+    try:
+        check_comparison_choice(HydraConfig.get().runtime.choices["comparison"], comparison_name, study.name)
+    except BuildDbError as exc:
+        sys.exit(f"\n[compare] {exc}")
 
     arms = list(OmegaConf.to_container(cfg.arms, resolve=True))  # type: ignore[arg-type]
     reference = str(cfg.reference)
     fields = list(OmegaConf.to_container(cfg.fields, resolve=True)) if cfg.get("fields") else None  # type: ignore[arg-type]
-    results_dir = Path(cfg.paths.studies_dir) / study.name / "results"
 
     objective = _objective(study, cohort, fields)
     metric_key = cfg.get("metric")
     try:
         spec = resolve_metric(objective, metric_key)  # the metric to score on; None -> endpoint default
         comparisons = compare_arms(
-            results_dir=results_dir,
+            studies_dir=cfg.paths.studies_dir,
+            study=study.name,
             cohort=cohort.name,
             arms=arms,
             reference=reference,
@@ -100,7 +91,7 @@ def main(cfg: DictConfig) -> None:
     except BuildDbError as exc:
         sys.exit(f"\n[compare] {exc}")
 
-    out_dir = Path(cfg.paths.studies_dir) / study.name / "comparisons" / comparison_name
+    out_dir = layout.nested_cv_comparison_dir(cfg.paths.studies_dir, study.name, comparison_name)
     # `metric_name` in the config overrides the display label. Otherwise the metric names itself.
     label = str(cfg.get("metric_name") or spec.label)
     summary = write_comparison(comparisons, comparison_name, out_dir, metric_name=label, chance=spec.chance)

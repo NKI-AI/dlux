@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for the expression endpoint (dlux.eval.regression_vector, regression_vector): the per-gene aggregation
+"""Tests for the expression endpoint (dlux.eval.regression_vector): the per-gene aggregation
 core (per-gene Pearson, constant-gene exclusion) + its gene-Pearson report artifacts, via the driver."""
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ import json
 
 import numpy as np
 import pytest
+
 from dlux.eval.aggregate import aggregate_experiment, write_reports
 from dlux.eval.predictions import write_predictions_npz
 
@@ -43,6 +44,7 @@ def _write_expr_fold(runs_root, field, outer, inner, patient_vecs, *, grid=None)
     }
     write_predictions_npz(payload, d / "test_predictions.npz")
     meta = {"n_outer": grid[0], "n_inner": grid[1]} if grid else {}
+    meta["test_coverage"] = {"declared": 0, "scored": 0, "lost": []}
     (d / "metadata.json").write_text(json.dumps(meta))
 
 
@@ -86,7 +88,7 @@ def test_constant_gene_is_undefined_for_spearman_not_a_perfect_rho():
 
     argsort breaks ties by position, so it invents a strictly increasing ranking for a constant column;
     both sides then rank identically and score rho = +1. Panels carry plenty of such genes, so counting
-    them inflates the median -- Pearson has always reported them as undefined and Spearman must agree.
+    them inflates the median -- Pearson reports them as undefined and Spearman must agree.
     """
     from dlux.eval.gene_metrics import gene_metric_summary, per_gene_pearson, per_gene_spearman
 

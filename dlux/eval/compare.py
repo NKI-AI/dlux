@@ -13,17 +13,16 @@
 # limitations under the License.
 """Qualitative comparison of experiment arms, from persisted aggregate output only.
 
-Reads each arm's ``per_patient_ensemble.csv`` and reports, per endpoint: every arm's per-fold and
+Reads each arm's ``per_patient_<field>.npz`` files and reports, per endpoint: every arm's per-fold and
 pooled metric, and the paired per-fold difference against a reference arm. Nothing is loaded, re-run
-or re-fitted. If an arm has not been aggregated, it does not appear here.
+or re-fitted. An arm that has not been aggregated raises.
 
-**It computes no test, interval or p-value, deliberately.** The few outer folds share training data, so
+It computes no test, interval or p-value, deliberately. The few outer folds share training data, so
 their differences are not independent and no honest inference rests on that few. This answers "is
-there maybe something here that justifies a more expensive experiment, and nothing more. See
+there maybe something here that justifies a more expensive experiment?", and nothing more. See
 ``docs/specs/COMPARE_SPEC.md`` for the staged design this is stage 1 of.
 
-Paired against a reference arm rather than all-vs-all: N arms give N(N-1)/2 pairs, which is quadratic
-to read and, once testing ever arrives, a far worse multiplicity problem than N-1.
+Each arm is paired against one reference arm, so N arms give N-1 pairs.
 
 The predictions are each arm's mean over its inner replicates, so a comparison is between ensembled
 procedures, not individual models, arm-level training noise is already partly averaged out.
@@ -39,15 +38,16 @@ from typing import Any, Callable, Dict, List, Sequence
 import numpy as np
 from sklearn.metrics import roc_auc_score
 
+from dlux.config.cohort import Objective
+from dlux.data import layout
 from dlux.data.errors import BuildDbError
-from dlux.eval._common import _roll_slides_to_patients, _roll_slides_to_patients_vec
+from dlux.eval._common import read_per_patient_npz
 from dlux.eval.binary import binary_metrics
+from dlux.eval.external import patient_arrays
 from dlux.eval.gene_metrics import per_gene_pearson
 from dlux.eval.multiclass import multiclass_metrics
 from dlux.eval.regression import regression_metrics
 from dlux.eval.survival_metrics import concordance_index
-
-_TABLE = "per_patient_ensemble.csv"
 
 
 @dataclass(frozen=True)
@@ -170,7 +170,9 @@ _METRICS: Dict[str, Dict[str, MetricSpec]] = {
 
 
 def default_metric_key(objective: str) -> str:
-    """The endpoint's standard comparison metric, the first registered for the objective."""
+    """The endpoint's headline metric, the first registered for the objective. Its key is also the name the
+    tasks stream it under (`test/auroc`, `test/r2`, `test/c_index`), so training logs the per-patient
+    counterpart as `test/<key>_patient`."""
     return next(iter(_METRICS[objective]))
 
 
@@ -201,121 +203,44 @@ def score_predictions(
     ensemble to average over; that is the only difference from the aggregate path.
 
     Resolves through the same ``resolve_metric`` the arm comparison uses, so a resplit trial and a
-    stage-1 comparison cannot disagree about what a number means.
+    stage-1 comparison cannot disagree about what a number means. The patient roll, the label shape and
+    the positive count are those of external scoring (``patient_arrays``).
     """
-    codes, labels = np.asarray(predictions["patient_codes"]), np.asarray(predictions["labels"])
-    values = np.asarray(predictions["probs"])
-    if objective in ("multiclass", "survival", "regression_vector"):
-        # multiclass: (K,) softmax per slide. survival: label is the (time, event) pair. expression:
-        # prediction and label are both the (G,) gene vector. All three carry a vector the flat roller
-        # cannot, so they ride the vec roller; only survival collapses its prediction back to a scalar.
-        rolled, per_patient_label = _roll_slides_to_patients_vec(codes, values.reshape(len(codes), -1), labels)
-        patients = sorted(rolled)
-        y = np.stack([np.atleast_1d(per_patient_label[p]) for p in patients])
-        x = np.stack([rolled[p] for p in patients])
-        if objective == "survival":
-            x = x.reshape(-1)
-    else:
-        rolled, per_patient_label = _roll_slides_to_patients(codes, values, labels)
-        patients = sorted(rolled)
-        y = np.asarray([per_patient_label[p] for p in patients])
-        x = np.asarray([rolled[p] for p in patients])
-    n_pos = int((y == 1).sum()) if objective == "binary" else int(y[:, 1].sum()) if objective == "survival" else 0
+    patients, y, x, n_pos = patient_arrays(
+        Objective(objective),
+        np.asarray(predictions["patient_codes"]),
+        np.asarray(predictions["probs"]),
+        np.asarray(predictions["labels"]),
+    )
     return float(resolve_metric(objective, metric_key).fn(y, x)), len(patients), n_pos
 
 
-# The logged/recorded key for each objective's headline metric. Mirrors the streamed names the tasks
-# build (`test/auroc`, `test/r2`, `test/c_index`) so the `_patient` variant matches its counterpart.
-METRIC_KEYS: Dict[str, str] = {
-    "binary": "auroc",
-    "multiclass": "auroc",  # macro one-vs-rest
-    "regression": "r2",
-    "survival": "c_index",
-    "regression_vector": "gene_pearson_mean",  # the per_fold_metrics / aggregate column name
-}
+def read_arm(
+    studies_dir: Path, study: str, arm: str, cohort: str, objective: str = "binary"
+) -> Dict[str, Dict[str, tuple]]:
+    """``field -> patient_code -> (outer_fold, prediction, target)`` from one arm's ``per_patient_<field>.npz``
+    files, the record ``aggregate`` writes. compare never reads the CSVs, which are for people.
 
-# Objectives whose per_patient_ensemble.csv cannot support their metric, and the richer per-endpoint
-# table to read instead. Multiclass ensembles to an argmax class there, losing the probabilities an
-# AUROC needs; survival records time as the label and drops the event indicator a C-index needs.
-_PREDICTIONS_TABLE = {"multiclass", "survival"}
-
-
-def _read_arm_expression(arm_dir: Path, arm: str) -> Dict[str, Dict[str, tuple]]:
-    """``field -> patient_code -> (outer_fold, pred_vector, label_vector)`` from the per-patient NPZ.
-
-    Expression's ensemble CSV is header-only (no per-patient scalar), so the field is discovered from
-    the ``per_patient_<field>.npz`` files instead, and the ``(N, G)`` gene matrices are read straight
-    back. float16 predictions are widened to float64 for the correlation."""
+    ``prediction`` and ``target`` carry whatever the objective's metric consumes: scalars for binary
+    and regression, a (K,) probability row and a class index for multiclass, a risk scalar and a
+    (time, event) pair for survival, and (G,) gene vectors for expression."""
+    arm_dir = layout.results_dir(studies_dir, study, arm, cohort)
     out: Dict[str, Dict[str, tuple]] = {}
     for npz_path in sorted(arm_dir.glob("per_patient_*.npz")):
         field = npz_path.stem[len("per_patient_") :]
-        data = np.load(npz_path, allow_pickle=True)
-        codes, folds = data["patient_codes"], data["outer_folds"]
-        preds, labels = data["preds"].astype(np.float64), data["labels"].astype(np.float64)
-        out[field] = {str(codes[i]): (int(folds[i]), preds[i], labels[i]) for i in range(len(codes))}
+        with np.load(npz_path, allow_pickle=False) as data:
+            stored = str(data["endpoint_type"])
+        if stored != objective:
+            raise BuildDbError(f"arm '{arm}': {npz_path.name} holds a {stored} endpoint, not {objective}.")
+        table = read_per_patient_npz(npz_path)
+        out[field] = {
+            code: (int(table.outer[i]), table.preds[i], table.labels[i]) for i, code in enumerate(table.codes)
+        }
     if not out:
         raise BuildDbError(
-            f"arm '{arm}': no per_patient_*.npz under {arm_dir}, which an expression comparison needs. "
-            f"Re-aggregate the arm."
+            f"no aggregate output for arm '{arm}': {arm_dir} holds no per_patient_<field>.npz. compare reads "
+            f"persisted results only, so the arm has to be aggregated first."
         )
-    return out
-
-
-def read_arm(results_dir: Path, arm: str, cohort: str, objective: str = "binary") -> Dict[str, Dict[str, tuple]]:
-    """``field -> patient_code -> (outer_fold, prediction, target)`` from one arm's aggregate output.
-
-    ``prediction`` and ``target`` carry whatever the objective's metric consumes: scalars for binary
-    and regression, an (N, K) probability row and a class index for multiclass, a risk scalar and a
-    (time, event) pair for survival, and the (G,) gene vector for expression."""
-    arm_dir = Path(results_dir) / arm / cohort
-    if objective == "regression_vector":
-        return _read_arm_expression(arm_dir, arm)
-    table = arm_dir / _TABLE
-    if not table.is_file():
-        raise BuildDbError(
-            f"no aggregate output for arm '{arm}': {table} is missing. compare reads persisted "
-            f"results only, so the arm has to be aggregated first."
-        )
-    # The ensemble table is the index of which endpoints this arm scored, even where it cannot supply
-    # the values the metric needs.
-    with table.open() as handle:
-        rows = list(csv.DictReader(handle))
-    fields = sorted({row["field"] for row in rows})
-
-    if objective not in _PREDICTIONS_TABLE:
-        out: Dict[str, Dict[str, tuple]] = {}
-        for row in rows:
-            out.setdefault(row["field"], {})[row["patient_code"]] = (
-                int(row["outer_fold"]),
-                float(row["ensemble_prediction"]),
-                float(row["label"]),
-            )
-        return out
-    return {field: _read_predictions(arm_dir, arm, field, objective) for field in fields}
-
-
-def _read_predictions(arm_dir: Path, arm: str, field: str, objective: str) -> Dict[str, tuple]:
-    """One endpoint's per-patient rows from ``predictions_<field>.csv``."""
-    table = arm_dir / f"predictions_{field}.csv"
-    if not table.is_file():
-        raise BuildDbError(
-            f"arm '{arm}' has no {table.name}, which a '{objective}' comparison needs (the ensemble "
-            f"table cannot supply it). Re-aggregate the arm."
-        )
-    out: Dict[str, tuple] = {}
-    with table.open() as handle:
-        for row in csv.DictReader(handle):
-            if objective == "multiclass":
-                # Sorted on the numeric suffix, not the string: prob_10 must not sort before prob_2.
-                keys = sorted((k for k in row if k.startswith("prob_")), key=lambda k: int(k[5:]))
-                probs = tuple(float(row[k]) for k in keys)
-                out[row["patient_code"]] = (int(row["outer_fold"]), probs, float(row["label"]))
-            else:  # survival
-                out[row["patient_code"]] = (
-                    int(row["outer_fold"]),
-                    float(row["risk"]),
-                    (float(row["time"]), float(row["event"])),
-                )
     return out
 
 
@@ -351,7 +276,8 @@ def _score(rows: Dict[str, tuple], metric: Callable[[np.ndarray, np.ndarray], fl
 
 
 def compare_arms(
-    results_dir: Path,
+    studies_dir: Path,
+    study: str,
     cohort: str,
     arms: Sequence[str],
     reference: str,
@@ -368,12 +294,14 @@ def compare_arms(
         raise BuildDbError(f"comparison needs at least two arms, got {list(arms)}.")
     metric = resolve_metric(objective, metric_key).fn
 
-    by_arm = {arm: read_arm(results_dir, arm, cohort, objective) for arm in arms}
-    shared = set.intersection(*(set(tables) for tables in by_arm.values()))
-    wanted = [f for f in (fields or sorted(shared)) if f in shared]
-    if not wanted:
+    by_arm = {arm: read_arm(studies_dir, study, arm, cohort, objective) for arm in arms}
+    wanted = list(fields) if fields else sorted(set().union(*(set(tables) for tables in by_arm.values())))
+    lacking = {field: [arm for arm in arms if field not in by_arm[arm]] for field in wanted}
+    lacking = {field: missing for field, missing in lacking.items() if missing}
+    if lacking or not wanted:
         raise BuildDbError(
-            f"arms {list(arms)} share no endpoint (each has: { {a: sorted(t) for a, t in by_arm.items()} })."
+            f"every arm must score every compared endpoint, but {lacking or 'no endpoint was found'} "
+            f"(each arm has: { {a: sorted(t) for a, t in by_arm.items()} })."
         )
 
     comparisons = []
@@ -390,12 +318,21 @@ def compare_arms(
                 f"'{field}': arms {list(arms)} share no patient (each scored: {coverage}). "
                 f"There is nothing to compare them on."
             )
+        # A per-fold delta pairs the arms fold by fold, so the arms must put each shared patient in the same
+        # outer fold. Arms on differently drawn folds would pair different patient sets under one fold name.
+        for arm in arms:
+            moved = sorted(p for p in common if by_arm[arm][field][p][0] != ref_rows[p][0])
+            if moved:
+                raise BuildDbError(
+                    f"'{field}': arms '{reference}' and '{arm}' put {len(moved)} shared patient(s) in different "
+                    f"outer folds (e.g. {moved[:5]}). They were trained on different splits, so their folds "
+                    f"cannot be paired."
+                )
         scores, deltas, pooled_deltas = [], {}, {}
         for arm in arms:
             rows = by_arm[arm][field]
-            # The label-agreement guard assumes every arm predicts the same target. Expression arms
-            # legitimately predict different gene panels (baseline full, hvg2000, hallmark), so their
-            # label vectors differ by design and there is no single target to agree on, skip it.
+            # The label-agreement guard assumes every arm predicts the same target. Expression arms may
+            # predict different gene panels, so their label vectors differ by design. Skip it for them.
             if arm != reference and objective != "regression_vector":
                 _assert_comparable(field, reference, ref_rows, arm, rows)
             scored = _score({p: rows[p] for p in common}, metric)
@@ -418,6 +355,20 @@ def compare_arms(
             )
         )
     return comparisons
+
+
+def check_comparison_choice(choice: str, comparison_name: str, study_name: str) -> None:
+    """The comparison config's folder must be the study and its leaf must be ``comparison_name``.
+
+    The output directory is named from ``comparison_name``, so a mismatch would write one comparison over
+    another. Raises ``BuildDbError``."""
+    parent, _, leaf = str(choice).rpartition("/")
+    if not parent:
+        raise BuildDbError(f"comparison must be study-scoped: comparison=<study>/<name>, got '{choice}'.")
+    if parent != study_name:
+        raise BuildDbError(f"comparison '{choice}' belongs to study '{parent}', but study={study_name}.")
+    if leaf != comparison_name:
+        raise BuildDbError(f"comparison '{choice}' sets comparison_name='{comparison_name}'; expected '{leaf}'.")
 
 
 def _fmt(value: float) -> str:
@@ -510,9 +461,17 @@ def write_comparison(
     metric_name: str = "AUROC",
     chance: float | None = 0.5,
 ) -> Path:
-    """Write ``summary.md`` + ``metric.png`` + ``deltas.png`` + ``per_fold.csv`` for one comparison."""
+    """Write ``summary.md`` + ``metric.png`` + ``deltas.png`` + ``per_fold.csv`` for one comparison. The folder
+    is written in full before it replaces the previous one (``layout.replaced_dir``). Returns summary.md."""
     out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    with layout.replaced_dir(out_dir) as tmp:
+        _write_comparison_into(comparisons, name, tmp, metric_name, chance)
+    return out_dir / "summary.md"
+
+
+def _write_comparison_into(
+    comparisons: List[FieldComparison], name: str, out_dir: Path, metric_name: str, chance: float | None
+) -> Path:
     _absolute_figure(comparisons, metric_name, chance, out_dir / "metric.png")
     _delta_figure(comparisons, metric_name, out_dir / "deltas.png")
 

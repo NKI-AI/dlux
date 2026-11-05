@@ -17,10 +17,12 @@ WSISurvivalTask time-bin discretisation / target selection / loss (on fake batch
 from __future__ import annotations
 
 import math
+from typing import Any, cast
 
 import numpy as np
 import pytest
 import torch
+
 from dlux.config.cohort import ContractField
 from dlux.tasks.survival import (
     ConcordanceIndex,
@@ -38,7 +40,7 @@ def _task(n_bins: int = 4, edges=(10.0, 20.0, 30.0)) -> WSISurvivalTask:
         target="pfi",
         contract_field=ContractField.model_validate(_SURVIVAL),
         inputs={},  # methods under test do not read the streams
-        data_description=None,  # not touched by the methods under test
+        data_description=cast(Any, None),  # not touched by the methods under test
         time_edges=np.asarray(edges, dtype=np.float32),
         n_bins=n_bins,
     )
@@ -104,7 +106,7 @@ def test_select_targets_bins_time():
 
 
 def test_time_edges_exposed_for_persistence():
-    assert _task(edges=(10.0, 20.0, 30.0)).time_edges.tolist() == [10.0, 20.0, 30.0]
+    assert _task(edges=(10.0, 20.0, 30.0)).fit_state().time_edges.tolist() == [10.0, 20.0, 30.0]
     # the inference-only construction has no fit split, so it has no edges to hand over.
     inference_only = WSISurvivalTask(
         target="pfi",
@@ -114,7 +116,7 @@ def test_time_edges_exposed_for_persistence():
         time_edges=None,
         n_bins=4,
     )
-    assert inference_only.time_edges is None
+    assert inference_only.fit_state().time_edges is None
 
 
 def test_compute_loss_and_metric_tensors():

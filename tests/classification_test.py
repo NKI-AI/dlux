@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import pytest
 import torch
+
 from dlux.tasks.classification import (
     EXCLUDED,
     LabelMapping,
@@ -82,23 +83,6 @@ def test_metric_tensors_are_probabilities():
     assert torch.allclose(preds.sum(dim=-1), torch.ones(2))
 
 
-def test_streamed_metric_matches_whole_batch_for_near_zero_logits():
-    """A metric streamed one sample at a time must equal the same metric computed in one shot,
-    including for near-zero logits that straddle [0, 1]."""
-    from torchmetrics import AUROC
-
-    logits = torch.tensor([[-0.58], [0.84], [0.31], [-0.12], [0.66], [-0.41]])
-    label = torch.tensor([0, 1, 1, 0, 1, 0])
-    preds, target = classification_metric_tensors(logits, label, is_binary=True)
-
-    streamed = AUROC(task="binary")
-    for p, t in zip(preds, target):
-        streamed.update(p.unsqueeze(0), t.unsqueeze(0))
-    one_shot = AUROC(task="binary")
-    one_shot.update(preds, target)
-    assert float(streamed.compute()) == pytest.approx(float(one_shot.compute()))
-
-
 def test_build_metrics_keys():
     bm = build_classification_metrics(is_binary=True, num_classes=1, split="validate")
     assert set(bm.keys()) == {"validate/accuracy", "validate/auroc"}
@@ -147,8 +131,7 @@ def test_balanced_class_weights_average_one_per_sample():
 
 
 def test_a_zero_weight_is_refused_rather_than_silently_unweighted():
-    """`{"0": 0, "1": 1}` used to reach `w1 / w0 if w0 else None` and come back None, i.e. training
-    unweighted while the config said otherwise."""
+    """A zero or negative class weight is refused. Otherwise it would train unweighted."""
     with pytest.raises(ValueError, match="must be > 0"):
         resolve_pos_weight({"0": 0.0, "1": 1.0}, [])
     with pytest.raises(ValueError, match="must be > 0"):

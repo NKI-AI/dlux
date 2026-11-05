@@ -22,8 +22,11 @@ Kept here rather than in the train bin so ``train.py`` stays a generic orchestra
 
 from __future__ import annotations
 
+import inspect
 import statistics
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Callable, Optional
 
 import numpy as np
 from hydra.utils import get_class
@@ -70,7 +73,7 @@ def _fit_records(database_uri, manifest_name, split_version, fit_patient_codes=N
 
 
 def _fit_class_indices(
-    database_uri, manifest_name, split_version, target, contract_field, target_stats=None, fit_patient_codes=None
+    database_uri, manifest_name, split_version, contract_field, target_stats=None, fit_patient_codes=None
 ):
     """This fold's ``fit``-split class indices, mapped through the same contract transform the model
     uses. Patients whose label is absent are skipped; out-of-map values arrive as ``EXCLUDED``."""
@@ -87,7 +90,6 @@ def _fit_loss_weights(
     database_uri,
     manifest_name,
     split_version,
-    target,
     contract_field,
     weight_spec,
     target_stats=None,
@@ -104,9 +106,7 @@ def _fit_loss_weights(
 
     # Only "balanced" needs the train-split class frequencies.
     fit_indices = (
-        _fit_class_indices(
-            database_uri, manifest_name, split_version, target, contract_field, target_stats, fit_patient_codes
-        )
+        _fit_class_indices(database_uri, manifest_name, split_version, contract_field, target_stats, fit_patient_codes)
         if weight_spec == "balanced"
         else []
     )
@@ -129,10 +129,10 @@ def _fit_loss_weights(
 
 
 def _fit_target_stats(
-    database_uri, manifest_name, split_version, target, contract_field, target_stats=None, fit_patient_codes=None
+    database_uri, manifest_name, split_version, contract_field, target_stats=None, fit_patient_codes=None
 ):
     """Mean/std of the continuous target over this fold's ``fit`` split only (leakage-clean, like
-    ``_fit_pos_weight``), for optional z-score standardisation. Missing/NaN excluded; population std;
+    ``_fit_loss_weights``), for optional z-score standardisation. Missing/NaN excluded; population std;
     degenerate (n<2 or std=0) falls back to (0, 1) = identity."""
     transform = build_field_transform(contract_field, target_stats)
     records = _fit_records(database_uri, manifest_name, split_version, fit_patient_codes)
@@ -149,26 +149,6 @@ def _fit_target_stats(
     mean = statistics.fmean(values)
     std = statistics.pstdev(values, mu=mean)
     return (mean, std) if std > 0.0 else (mean, 1.0)
-
-
-def _target_zscore(
-    objective,
-    target_normalize,
-    database_uri,
-    manifest_name,
-    split_version,
-    target,
-    contract_field,
-    target_stats=None,
-    fit_patient_codes=None,
-):
-    """Scalar-target (μ, σ): fit-split stats when regression + ``zscore`` requested, else identity (0, 1).
-    Shared by the regression and fusion paths (the fusion head trains its scalar target in z-space too)."""
-    if objective == Objective.regression and target_normalize == "zscore":
-        return _fit_target_stats(
-            database_uri, manifest_name, split_version, target, contract_field, target_stats, fit_patient_codes
-        )
-    return 0.0, 1.0
 
 
 def _fit_gene_stats(
@@ -224,13 +204,183 @@ def _fit_time_bins(database_uri, manifest_name, split_version, event_col, time_c
     return edges
 
 
+# The top-level task-config keys that task construction reads itself. Every other key is an option of the
+# task class and must be a parameter of its constructor.
+_BUILD_KEYS = {"_target_", "target", "target_normalize", "loss", "inputs"}
+
+# The constructor arguments construction supplies itself, never from the task config.
+_SUPPLIED = {"self", "target", "contract_field", "data_description", "inputs", "target_stats"}
+
+
+def task_class_and_options(task_cfg) -> tuple[type, dict]:
+    """The task class the config's ``_target_`` names, and the config's options for its constructor.
+
+    Every task-config key outside the keys construction reads itself is an option, so a task class takes its
+    own options from YAML. A key the constructor does not accept raises ``ValueError``, so a typo cannot
+    pass without effect."""
+    task_path = task_cfg.get("_target_")
+    if not task_path:
+        raise ValueError("task config must declare `_target_` (the task class), e.g. config/task/wsi_survival.yaml.")
+    task_cls = get_class(str(task_path))
+    accepted = set(inspect.signature(task_cls).parameters) - _SUPPLIED
+    options = {key: task_cfg[key] for key in task_cfg if key not in _BUILD_KEYS}
+    unknown = sorted(set(options) - accepted)
+    if unknown:
+        raise ValueError(
+            f"task: unknown key(s) {unknown}. {task_cls.__name__} takes {sorted(accepted)}, and task "
+            f"construction reads {sorted(_BUILD_KEYS)}."
+        )
+    options = {
+        key: OmegaConf.to_container(value, resolve=True) if OmegaConf.is_config(value) else value
+        for key, value in options.items()
+    }
+    return task_cls, options
+
+
+def construct_task(task_cfg, *, target, contract_field, data_description, inputs, target_stats, fit_extras) -> Any:
+    """The task the config names, built over ``data_description``.
+
+    Training and scoring both build a task here, and differ only in where ``inputs`` and ``fit_extras`` come
+    from: fitted on a fold's fit split, or restored from what a run recorded."""
+    task_cls, options = task_class_and_options(task_cfg)
+    return task_cls(
+        target=target,
+        contract_field=contract_field,
+        data_description=data_description,
+        inputs=inputs,
+        target_stats=target_stats,
+        **options,
+        **fit_extras,
+    )
+
+
+@dataclass(frozen=True)
+class _FitRequest:
+    """What every endpoint's fit-time setup may read. Each ``_*_extras`` function below uses its own part."""
+
+    cfg: Any
+    manifest_name: str
+    contract_field: Any
+    target_normalize: str
+    loss_weight: Any
+    database_uri: str
+    split_version: Optional[str]
+    matrix_path: Path
+    gene_panel: str
+    target_stats: Any
+    fit_patient_codes: Any
+
+
+def _warn_loss_weight_ignored(request: _FitRequest) -> None:
+    # Warned rather than raised because a study can share one experiment recipe across endpoints of
+    # different objectives.
+    if request.loss_weight != "none":
+        logger.warning(
+            "task.loss.weight=%r ignored for %s endpoints (classification only).",
+            request.loss_weight,
+            request.contract_field.objective.value,
+        )
+
+
+def _warn_target_normalize_ignored(request: _FitRequest, reason: str) -> None:
+    if request.target_normalize != "none":
+        logger.warning(
+            "task.target_normalize=%r ignored for %s endpoints (%s).",
+            request.target_normalize,
+            request.contract_field.objective.value,
+            reason,
+        )
+
+
+def _classification_extras(request: _FitRequest) -> dict:
+    """``pos_weight`` for binary, ``class_weights`` for multiclass (see ``_fit_loss_weights``)."""
+    _warn_target_normalize_ignored(request, "regression only")
+    return _fit_loss_weights(
+        request.database_uri,
+        request.manifest_name,
+        request.split_version,
+        request.contract_field,
+        request.loss_weight,
+        request.target_stats,
+        request.fit_patient_codes,
+    )
+
+
+def _regression_extras(request: _FitRequest) -> dict:
+    """The scalar target's fit-split (μ, σ) when ``target_normalize`` is ``zscore``, else the identity (0, 1)."""
+    _warn_loss_weight_ignored(request)
+    if request.target_normalize != "zscore":
+        return {"target_mean": 0.0, "target_std": 1.0}
+    mean, std = _fit_target_stats(
+        request.database_uri,
+        request.manifest_name,
+        request.split_version,
+        request.contract_field,
+        request.target_stats,
+        request.fit_patient_codes,
+    )
+    logger.info("target_normalize=zscore -> fit-split μ=%.4g σ=%.4g", mean, std)
+    return {"target_mean": mean, "target_std": std}
+
+
+def _survival_extras(request: _FitRequest) -> dict:
+    """The discrete-time bin edges from the fit split. ``n_bins`` itself is the task's own option."""
+    _warn_loss_weight_ignored(request)
+    _warn_target_normalize_ignored(request, "regression only")
+    n_bins = request.cfg.task.get("n_bins")
+    if n_bins is None:
+        raise ValueError("a survival task config sets n_bins, the number of discrete-time intervals.")
+    n_bins = int(n_bins)
+    time_edges = _fit_time_bins(
+        request.database_uri,
+        request.manifest_name,
+        request.split_version,
+        request.contract_field.source.column,
+        request.contract_field.source.time_column,
+        n_bins,
+        request.fit_patient_codes,
+    )
+    return {"time_edges": time_edges}
+
+
+def _expression_extras(request: _FitRequest) -> dict:
+    """The active gene panel and the per-gene fit-split μ/σ of log1p expression."""
+    _warn_loss_weight_ignored(request)
+    _warn_target_normalize_ignored(request, "log1p + per-gene z-score is intrinsic")
+    gene_ids, gene_means, gene_stds = _fit_gene_stats(
+        request.matrix_path,
+        request.database_uri,
+        request.manifest_name,
+        request.split_version,
+        request.gene_panel,
+        request.matrix_path.parent / "panels",
+        request.fit_patient_codes,
+    )
+    return dict(
+        matrix_path=request.matrix_path,
+        gene_means=gene_means,
+        gene_stds=gene_stds,
+        gene_ids=gene_ids,
+        gene_panel=request.gene_panel,
+    )
+
+
+# Each objective's fit-time setup. Every one reads the ``fit`` patients only.
+_FIT_EXTRAS: dict[Objective, Callable[[_FitRequest], dict]] = {
+    Objective.binary: _classification_extras,
+    Objective.multiclass: _classification_extras,
+    Objective.regression: _regression_extras,
+    Objective.survival: _survival_extras,
+    Objective.regression_vector: _expression_extras,
+}
+
+
 def resolve_fit_extras(
     objective,
     *,
     cfg,
     manifest_name,
     contract_field,
-    target,
     target_normalize,
     loss_weight,
     database_uri,
@@ -241,90 +391,30 @@ def resolve_fit_extras(
     fit_patient_codes=None,  # names the fit set directly when the split was drawn in memory
 ):
     """The endpoint's fold-specific, leakage-clean fit-time kwargs, exactly the extras its ``__init__``
-    needs beyond ``common``. Every stat reads the ``fit`` patients only, named either by
-    ``split_version`` or by ``fit_patient_codes`` (see ``_fit_records``).
+    needs beyond ``common`` (see ``_FIT_EXTRAS``). Every stat reads the ``fit`` patients only, named either
+    by ``split_version`` or by ``fit_patient_codes`` (see ``_fit_records``). A knob the objective does not
+    use is logged as ignored.
 
     These are target-side statistics only. An input stream resolves its own (see ``Modality.from_spec``)."""
-    extras = {}
-
-    # Class weighting is meaningful only where there are classes. Warned rather than raised because a
-    # study can share one experiment recipe across endpoints of different objectives.
-    if loss_weight != "none" and objective not in (Objective.binary, Objective.multiclass):
-        logger.warning(
-            "task.loss.weight=%r ignored for %s endpoints (classification only).", loss_weight, objective.value
-        )
-
-    # Expression target: active gene panel + per-gene fit-split μ/σ.
-    if objective == Objective.regression_vector:
-        gene_ids, gene_means, gene_stds = _fit_gene_stats(
-            matrix_path,
-            database_uri,
-            manifest_name,
-            split_version,
-            gene_panel,
-            matrix_path.parent / "panels",
-            fit_patient_codes,
-        )
-        extras.update(
-            matrix_path=matrix_path,
-            gene_means=gene_means,
-            gene_stds=gene_stds,
-            gene_ids=gene_ids,
-            gene_panel=gene_panel,
-        )
-
-    # Survival: discrete-time bin edges (+ n_bins). Identical for the fused and unfused survival tasks.
-    if objective == Objective.survival:
-        n_bins = int(cfg.task.get("n_bins", 4))
-        extras["time_edges"] = _fit_time_bins(
-            database_uri,
-            manifest_name,
-            split_version,
-            contract_field.source.column,
-            contract_field.source.time_column,
-            n_bins,
-            fit_patient_codes,
-        )
-        extras["n_bins"] = n_bins
-        return extras
-
-    if objective == Objective.regression:
-        mean, std = _target_zscore(
-            objective,
-            target_normalize,
-            database_uri,
-            manifest_name,
-            split_version,
-            target,
-            contract_field,
-            target_stats,
-            fit_patient_codes,
-        )
-        if target_normalize == "zscore":
-            logger.info("target_normalize=zscore -> fit-split μ=%.4g σ=%.4g", mean, std)
-        return {"target_mean": mean, "target_std": std}
-
-    if objective == Objective.regression_vector:
-        if target_normalize != "none":
-            logger.warning(
-                "task.target_normalize=%r ignored for expression (log1p + per-gene z-score is intrinsic).",
-                target_normalize,
-            )
-        return extras  # the gene extras assembled above
-
-    # binary / multiclass -> classification (pos_weight for binary, class_weights for multiclass).
-    if target_normalize != "none":
-        logger.warning(
-            "task.target_normalize=%r ignored for %s endpoints (regression only).", target_normalize, objective.value
-        )
-    return _fit_loss_weights(
-        database_uri, manifest_name, split_version, target, contract_field, loss_weight, target_stats, fit_patient_codes
+    request = _FitRequest(
+        cfg=cfg,
+        manifest_name=manifest_name,
+        contract_field=contract_field,
+        target_normalize=target_normalize,
+        loss_weight=loss_weight,
+        database_uri=database_uri,
+        split_version=split_version,
+        matrix_path=matrix_path,
+        gene_panel=gene_panel,
+        target_stats=target_stats,
+        fit_patient_codes=fit_patient_codes,
     )
+    return _FIT_EXTRAS[objective](request)
 
 
-def resolve_replay_extras(objective, recorded, *, matrix_path, gene_panel):
+def resolve_recorded_extras(objective, recorded, *, matrix_path, gene_panel):
     """The mirror of ``resolve_fit_extras`` for a cohort with no ``fit`` split: the same target-side
-    kwargs, replayed from what the run recorded rather than fitted from the DB.
+    kwargs, restored from what the run recorded rather than fitted from the DB.
 
     Only endpoints whose target carries fit-derived state that scoring needs produce anything here.
     Survival's time edges are training-only, and a z-scored scalar target's μ/σ come from the run's
@@ -333,6 +423,8 @@ def resolve_replay_extras(objective, recorded, *, matrix_path, gene_panel):
     if objective != Objective.regression_vector:
         return {}
 
+    if gene_panel is None:
+        raise ValueError("an expression run records its gene panel at task.target.gene_panel, and this one has none.")
     key = "expression"  # the stream key WSIBulkRNATask gives its RNA target
     state = recorded.get(key)
     if state is None:
@@ -342,7 +434,7 @@ def resolve_replay_extras(objective, recorded, *, matrix_path, gene_panel):
             f"refitting here would change the input distribution anyway. Re-run that sweep so it records "
             f"its stream state."
         )
-    gene_ids, gene_means, gene_stds = BulkRNA.replay_stats(
+    gene_ids, gene_means, gene_stds = BulkRNA.recorded_stats(
         state, key=key, matrix_path=matrix_path, gene_panel=gene_panel
     )
     return dict(
@@ -372,8 +464,12 @@ def build_inputs(cfg, ctx: ModalityContext) -> dict:
     specs = cfg.task.get("inputs")
     if not specs:
         raise ValueError("task config must declare `inputs:` — the named data streams the model reads.")
+    declared = OmegaConf.to_container(specs, resolve=True)
+    if not isinstance(declared, dict):
+        raise ValueError("task `inputs:` must be a mapping of stream name to spec.")
     inputs = {}
-    for name, spec in OmegaConf.to_container(specs, resolve=True).items():
+    for raw_name, spec in declared.items():
+        name = str(raw_name)
         if not isinstance(spec, dict) or not spec.get("modality"):
             raise ValueError(f"input '{name}': must declare `modality:` (one of {sorted(MODALITIES)}).")
         modality = MODALITIES.get(str(spec["modality"]))
@@ -402,33 +498,26 @@ def _warn_ungated_inputs(cfg, inputs: dict) -> None:
 def build_task(cfg, cohort, contract_field, tiling, database_uri, split_version, fit_patient_codes=None):
     """Construct the endpoint's task (with its fold-specific fit-time setup + head width) from config.
 
-    The task class comes from the task config's ``_target_``, like every other constructed component.
-    Each class then validates the contract objective it was handed. ``resolve_fit_extras`` supplies the
-    class's fold-specific kwargs (class weighting / target z-score / gene panel / survival bins), all
-    read from the ``fit`` patients only. Raises ValueError on a bad config value.
+    The task class comes from the task config's ``_target_``, like every other constructed component, and
+    ``construct_task`` builds it. Each class then validates the contract objective it was handed.
+    ``resolve_fit_extras`` supplies the class's fold-specific kwargs (class weighting / target z-score /
+    gene panel / survival bins), all read from the ``fit`` patients only. Raises ValueError on a bad config
+    value.
 
     Callers name the fit set one of two ways, and exactly one (see ``_fit_records``): ``split_version``
     for a split stored in the DB, ``fit_patient_codes`` for one drawn in memory."""
     objective = contract_field.objective
-
-    if "fuse_rna" in cfg.task:
-        raise ValueError("task.fuse_rna is gone. Declare the model's data streams under `inputs:` instead.")
+    task_class_and_options(cfg.task)  # refuse a bad task config before the slow steps below
 
     target_normalize = str(cfg.task.get("target_normalize", "none"))
     if target_normalize not in ("none", "zscore"):
         raise ValueError(f"task.target_normalize must be 'none' or 'zscore', got '{target_normalize}'.")
 
-    # Validated through the schema rather than by hand: `weight` admits two literals or a per-class
-    # map, which is more shape than an inline check states clearly.
+    # Validated through the schema: `weight` admits two literals or a per-class map.
     raw_loss = cfg.task.get("loss")
     loss_weight = LossSpec(**(OmegaConf.to_container(raw_loss, resolve=True) if raw_loss else {})).weight
 
-    task_path = cfg.task.get("_target_")
-    if not task_path:
-        raise ValueError("task config must declare `_target_` (the task class), e.g. config/task/wsi_survival.yaml.")
-    task_cls = get_class(str(task_path))
     target = _target_field(cfg)
-
     data_description = compile_data_description(cohort, tiling, database_uri, split_version=split_version)
 
     def _fit_patient_codes(_cache={}):  # lazy + memoised: only a fold-dependent modality pays for it
@@ -455,19 +544,11 @@ def build_task(cfg, cohort, contract_field, tiling, database_uri, split_version,
         ),
     )
     _warn_ungated_inputs(cfg, inputs)
-    common = dict(
-        target=target,
-        contract_field=contract_field,
-        data_description=data_description,
-        inputs=inputs,
-        target_stats=target_stats,
-    )
     extras = resolve_fit_extras(
         objective,
         cfg=cfg,
         manifest_name=cohort.name,
         contract_field=contract_field,
-        target=target,
         target_normalize=target_normalize,
         loss_weight=loss_weight,
         target_stats=target_stats,
@@ -477,4 +558,12 @@ def build_task(cfg, cohort, contract_field, tiling, database_uri, split_version,
         matrix_path=bulk_rna_matrix.matrix_path(cfg.paths.cohorts_dir, cohort.name),
         gene_panel=str(cfg.task.target.get("gene_panel", "full")),  # a read parameter of the target
     )
-    return task_cls(**common, **extras)
+    return construct_task(
+        cfg.task,
+        target=target,
+        contract_field=contract_field,
+        data_description=data_description,
+        inputs=inputs,
+        target_stats=target_stats,
+        fit_extras=extras,
+    )

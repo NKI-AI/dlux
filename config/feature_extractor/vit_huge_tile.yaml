@@ -1,0 +1,9 @@
+# @package feature_extractor
+# ViT-H/14 pretrained on ImageNet-21k (timm vit_huge_patch14_224.orig_in21k), frozen: a natural-image baseline
+# for the histology foundation models. Normalisation and feature dim are read from the .pack; model_name
+# names the feature cache. Produce the .pack with:
+#   python -m ahcore.tools.fomo_pack \
+#     --output-dir <models_dir> --models vit-huge
+_target_: ahcore.feature_extractors.from_pack.PackFeatureExtractor
+pack_path: ${paths.models_dir}/vit-huge.pack
+model_name: vit_huge_in21k

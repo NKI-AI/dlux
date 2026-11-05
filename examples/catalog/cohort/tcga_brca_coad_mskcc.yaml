@@ -1,11 +1,11 @@
 # @package cohort
 # Open-access reference cohort: TCGA BRCA-vs-COAD, single center "MSKCC" (one center, never full TCGA).
 # Binary cancer_type endpoint; the external-validation cohort of the tcga_subtyping example (scored by the
-# Christiana-developed models). Its own pinned GDC manifest + build_sheets.py --center mskcc; same shape as
+# Christiana-developed models). Its own pinned GDC manifest + build_sheets.py --metadata manifests/mskcc_metadata.tsv; same shape as
 # christiana, a different center filter.
 name: tcga_brca_coad_mskcc
 storage:
-  image_dir: ${paths.cohorts.tcga_brca_coad_mskcc.image_dir} # set in config/local/paths (see the template)
+  image_dir: ${paths.cohorts.tcga_brca_coad_mskcc.image_dir} # set in config/project/paths
   mask_dir: ${paths.cohorts.tcga_brca_coad_mskcc.mask_dir}
   default_reader: FASTSLIDE
   default_staining: "H&E"

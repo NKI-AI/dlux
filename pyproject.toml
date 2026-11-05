@@ -14,7 +14,7 @@ maintainers = [
     { name = "AI for Oncology", email = "j.teuwen@nki.nl" },
 ]
 license = { text = "Apache-2.0" }
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
@@ -24,14 +24,12 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Medical Science Apps.",
     "Topic :: Scientific/Engineering :: Image Processing",
 ]
-# Pinned so a venv built from this project trains against the same tested stack. Loosen to floors when the
-# public release no longer needs to match that stack exactly.
+# Pinned so a venv built from this project trains against the same tested stack.
 dependencies = [
-    "ahcore==0.1.1",
+    "ahcore[remote]==0.4.0",  # remote: SLIDESCORE-backed cohorts stream slides over the network
     "hydra-core~=1.3",
     "imagecodecs>=2025",
     "imageio~=2.37",
@@ -53,12 +51,15 @@ dependencies = [
 
 [project.optional-dependencies]
 # serve_slides: the tile-serving viewer.
-viewer = ["fastapi", "fastslide==0.8.0", "uvicorn"]
+viewer = ["fastapi==0.115.11", "fastslide==0.8.1", "uvicorn==0.34.0"]
 # generate_masks: fetches the tissue-segmentation pack from HuggingFace.
 masks = ["huggingface-hub~=0.28"]
+# dlup's OpenSlide backend, for a cohort whose reader is OPENSLIDE. FASTSLIDE is the default and reads
+# these slides without it, so the binary wheel is not installed unless a cohort asks for that reader.
+openslide = ["ahcore[openslide]==0.4.0"]
 # Everything, so one venv runs every bin/ endpoint.
 all = ["dlux[viewer,masks]"]
-dev = ["pytest>=7.0", "pytest-mock", "ruff", "mypy"]
+dev = ["httpx==0.28.1", "pytest>=7.0", "pytest-mock", "pyyaml", "ruff", "mypy", "tifffile"]  # httpx: fastapi.testclient
 
 [tool.hatch.version]
 path = "dlux/__init__.py"
@@ -73,3 +74,27 @@ include = [
     "README.md",
     "pyproject.toml",
 ]
+
+[tool.mypy]
+warn_redundant_casts = true
+warn_unused_ignores = true
+
+# These ship no py.typed marker, so mypy cannot see any type information for them and errors on the
+# import itself. Listed one by one rather than globally, so a typo in a first-party import still fails.
+[[tool.mypy.overrides]]
+module = ["pandas.*", "sklearn.*", "seaborn.*", "tqdm.*", "fastslide.*", "yaml.*"]
+ignore_missing_imports = true
+
+# Lint and format rules. Imports sort with dlux as first-party and ahcore / aifocore / dlup in a section of their own.
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ruff.lint.isort]
+section-order = ["future", "standard-library", "third-party", "organization", "first-party", "local-folder"]
+
+[tool.ruff.lint.isort.sections]
+organization = ["ahcore", "aifocore", "dlup"]

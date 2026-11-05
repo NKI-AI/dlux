@@ -15,9 +15,8 @@
 
 The model is the public HuggingFace ``NKI-AI/tissue-bg-all-stains`` ``.pack`` (a zip of a TorchScript
 ``model.pt`` + an ``model_config.xml`` giving mpp / tile size / normalisation). We run it tile-by-tile
-via dlup and stitch to a pyramidal ``<stem>.mask.tiff``. It runs on dlux's already-bundled WSI machinery
-(ahcore zarr I/O + dlup tiling/TIFF), so the public dlux release carries no extra vendored library,
-only the model (fetched from HF) and this glue we own.
+via dlup and stitch to a pyramidal ``<stem>.mask.tiff``. It runs on dlux's bundled WSI machinery
+(ahcore zarr I/O + dlup tiling/TIFF). Only the model is fetched, from HF.
 """
 
 from __future__ import annotations
@@ -36,12 +35,20 @@ import torch
 
 from ahcore.readers import StitchingMode, ZarrFileImageReader
 from ahcore.utils.io import get_logger
+from ahcore.utils.remote import is_remote_reader
 from ahcore.writers import DataFormat, ZarrFileImageWriter
 from dlup import ImageConfig, SlideDataset, SlideImage, TilingConfig
-from dlup.tiling import Grid
+from dlup.tiling import Grid, GridOrder, TilingMode
+from dlup.utils.backends import ImageBackend
 from dlup.writers import TiffCompression, TifffileImageWriter
 
 logger = get_logger(__name__)
+
+
+def _slide_source(image_file: "str | Path", reader: str) -> "str | Path":
+    """What to hand dlup as the slide: a local reader wants a ``Path``; a remote reader wants the raw
+    URL string, which ``Path()`` would corrupt (``https://`` -> ``https:/``)."""
+    return str(image_file) if is_remote_reader(reader) else Path(image_file)
 
 
 @contextlib.contextmanager
@@ -151,18 +158,24 @@ def _write_overlay(
 
 
 def write_overlay(
-    image_file: Path, mask_file: Path, thumbnail_file: Path, *, reader: str = "FASTSLIDE", quiet: bool = True
+    image_file: "str | Path",
+    mask_file: Path,
+    thumbnail_file: Path,
+    *,
+    reader: str = "FASTSLIDE",
+    quiet: bool = True,
 ) -> None:
     """Backfill a QC thumbnail from an already-written ``.mask.tiff``, opens the slide standalone (no
     model, no inference), so it runs over a directory of masks that lack thumbnails."""
-    _write_overlay(SlideImage.from_file_path(Path(image_file), backend=reader), mask_file, thumbnail_file, quiet=quiet)
+    with SlideImage.from_file_path(_slide_source(image_file, reader), backend=reader) as slide_image:
+        _write_overlay(slide_image, mask_file, thumbnail_file, quiet=quiet)
 
 
 @torch.no_grad()
 def segment_slide(
     model: torch.jit.ScriptModule,
     config: SegConfig,
-    image_file: Path,
+    image_file: "str | Path",
     output_file: Path,
     *,
     device: torch.device,
@@ -175,85 +188,87 @@ def segment_slide(
     resolved through an intermediate zarr (crop stitching). If ``thumbnail_file`` is given, also write a
     low-res QC overlay PNG. Returns the number of unreadable
     (corrupt) tiles that were marked background."""
-    dataset = SlideDataset.from_standard_tiling(
-        Path(image_file),
-        image_config=ImageConfig(backend=reader, apply_color_profile=False),
-        tiling_config=TilingConfig(
-            mpp=config.mpp,
-            tile_size=config.tile_size,
-            tile_overlap=config.tile_overlap,
-            random_sample_in_grid=False,
-            tile_mode="overflow",
-            grid_order="C",
-            limit_bounds=True,
-        ),
-    )
-    slide_image = dataset.slide_image
-    scaled_view = slide_image.get_view_at_scaling(slide_image.get_scaling(config.mpp))
-    mean = torch.tensor(config.mean, device=device).view(1, len(config.mean), 1, 1)
-    std = torch.tensor(config.std, device=device).view(1, len(config.std), 1, 1)
+    with (
+        SlideDataset.from_standard_tiling(
+            _slide_source(image_file, reader),
+            image_config=ImageConfig(backend=ImageBackend[reader], apply_color_profile=False),
+            tiling_config=TilingConfig(
+                mpp=config.mpp,
+                tile_size=config.tile_size,
+                tile_overlap=config.tile_overlap,
+                random_sample_in_grid=False,
+                tile_mode=TilingMode.overflow,
+                grid_order=GridOrder.C,
+                limit_bounds=True,
+            ),
+        ) as dataset,
+        dataset.slide_image as slide_image,
+    ):
+        scaled_view = slide_image.get_view_at_scaling(slide_image.get_scaling(config.mpp))
+        mean = torch.tensor(config.mean, device=device).view(1, len(config.mean), 1, 1)
+        std = torch.tensor(config.std, device=device).view(1, len(config.std), 1, 1)
 
-    Path(output_file).parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory() as tmpdir:
-        zarr_path = Path(tmpdir) / "seg.zarr"
-        zarr_writer = ZarrFileImageWriter(
-            zarr_path,
-            size=scaled_view.size,
-            mpp=config.mpp,
-            tile_size=config.tile_size,
-            tile_overlap=config.tile_overlap,
-            num_samples=len(dataset),
-            data_format=DataFormat.IMAGE,
-        )
-
-        # A few tiles in some TCGA .svs files have corrupt/missing data (DATA_LOSS, usually edge tiles).
-        # Treat an unreadable tile as background rather than failing the whole slide.
-        background = np.zeros((1, 1, config.tile_size[1], config.tile_size[0]), dtype="uint8")
-        failed = 0
-
-        def _tiles():
-            nonlocal failed
-            for sample in dataset:
-                coordinates = np.asarray(sample.coordinates)[np.newaxis, ...]
-                try:
-                    image = sample.image.to_numpy()[:, :, :3]
-                except Exception:  # noqa: BLE001, corrupt tile data: mark background, keep the slide going
-                    failed += 1
-                    yield coordinates, background
-                    continue
-                data = torch.from_numpy(image).permute(2, 0, 1).unsqueeze(0).float().to(device) / 255.0
-                data = (data - mean) / std
-                segmentation = model(data).cpu()[0].argmax(dim=0).numpy().astype("uint8")
-                yield coordinates, segmentation[np.newaxis, np.newaxis, ...]
-
-        with _suppress_c_stderr(quiet_reader):
-            zarr_writer.consume(_tiles())
-        if failed:
-            logger.warning(
-                "%s: %d/%d tiles unreadable (corrupt slide data) -> marked background",
-                Path(image_file).name,
-                failed,
-                len(dataset),
+        Path(output_file).parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            zarr_path = Path(tmpdir) / "seg.zarr"
+            zarr_writer = ZarrFileImageWriter(
+                zarr_path,
+                size=scaled_view.size,
+                mpp=config.mpp,
+                tile_size=config.tile_size,
+                tile_overlap=config.tile_overlap,
+                num_samples=len(dataset),
+                data_format=DataFormat.IMAGE,
             )
 
-        zarr_reader = ZarrFileImageReader(zarr_path, stitching_mode=StitchingMode.CROP)
-        grid = Grid.from_tiling(
-            (0, 0), zarr_reader.size, tile_size=config.tile_size, tile_overlap=(0, 0), mode="overflow", order="C"
-        )
+            # A few tiles in some TCGA .svs files have corrupt/missing data (DATA_LOSS, usually edge tiles).
+            # Treat an unreadable tile as background rather than failing the whole slide.
+            background = np.zeros((1, 1, config.tile_size[1], config.tile_size[0]), dtype="uint8")
+            failed = 0
 
-        def _regions():
-            for coordinates in grid:
-                yield zarr_reader.read_region(coordinates, 0, config.tile_size).astype(np.uint8)
+            def _tiles():
+                nonlocal failed
+                for sample in dataset:
+                    coordinates = np.asarray(sample.coordinates)[np.newaxis, ...]
+                    try:
+                        image = sample.image.to_numpy()[:, :, :3]
+                    except Exception:  # noqa: BLE001, corrupt tile data: mark background, keep the slide going
+                        failed += 1
+                        yield coordinates, background
+                        continue
+                    data = torch.from_numpy(image).permute(2, 0, 1).unsqueeze(0).float().to(device) / 255.0
+                    data = (data - mean) / std
+                    segmentation = model(data).cpu()[0].argmax(dim=0).numpy().astype("uint8")
+                    yield coordinates, segmentation[np.newaxis, np.newaxis, ...]
 
-        TifffileImageWriter(
-            Path(output_file),
-            size=zarr_reader.size,
-            mpp=zarr_reader.mpp,
-            tile_size=config.tile_size,
-            pyramid=True,
-            compression=TiffCompression.ZSTD,
-        ).from_tiles_iterator(_regions())
+            with _suppress_c_stderr(quiet_reader):
+                zarr_writer.consume(_tiles())
+            if failed:
+                logger.warning(
+                    "%s: %d/%d tiles unreadable (corrupt slide data) -> marked background",
+                    Path(image_file).name,
+                    failed,
+                    len(dataset),
+                )
 
-    if thumbnail_file is not None:
-        _write_overlay(slide_image, output_file, thumbnail_file, quiet=quiet_reader)
+            zarr_reader = ZarrFileImageReader(zarr_path, stitching_mode=StitchingMode.CROP)
+            grid = Grid.from_tiling(
+                (0, 0), zarr_reader.size, tile_size=config.tile_size, tile_overlap=(0, 0), mode="overflow", order="C"
+            )
+
+            def _regions():
+                for coordinates in grid:
+                    yield zarr_reader.read_region(coordinates, 0, config.tile_size).astype(np.uint8)
+
+            TifffileImageWriter(
+                Path(output_file),
+                size=zarr_reader.size,
+                mpp=zarr_reader.mpp,
+                tile_size=config.tile_size,
+                pyramid=True,
+                compression=TiffCompression.ZSTD,
+            ).from_tiles_iterator(_regions())
+
+        if thumbnail_file is not None:
+            _write_overlay(slide_image, output_file, thumbnail_file, quiet=quiet_reader)
     return failed

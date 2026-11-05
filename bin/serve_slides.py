@@ -29,15 +29,17 @@ from pathlib import Path
 
 import hydra
 import uvicorn
-from dlux.config.cohort import Cohort
-from dlux.data import layout
-from dlux.eval.run_records import RunRecords, class_names, load_run_records
-from dlux.viewer import create_app, resolve_entries
 from omegaconf import DictConfig, OmegaConf
 from pydantic import ValidationError
 
 from ahcore.manifest import DataManager
 from ahcore.utils.io import get_logger, print_config
+
+from dlux.config.cohort import Cohort
+from dlux.config.resolvers import register_resolvers
+from dlux.data import layout
+from dlux.viewer import create_app, resolve_entries
+from dlux.viewer.run_records import RunRecords, class_names, load_run_records
 
 logger = get_logger(__name__)
 
@@ -56,7 +58,7 @@ def _in_study_slides(cfg: DictConfig, cohort: Cohort, study: str, records: RunRe
         return None
     outer = records.folds[0]
     split_version = f"{outer}_i{records.inners_by_outer[outer][0]}"
-    manager = DataManager(f"sqlite:///{database}")
+    manager = DataManager(layout.db_uri(cfg.paths.studies_dir, study, cohort.name))
     try:
         patients = manager.get_records_by_split(manifest_name=cohort.name, split_version=split_version)
         return {str(image.filename) for patient in patients for image in patient.images}
@@ -84,7 +86,7 @@ def _resolve_run(cfg: DictConfig, cohort: Cohort) -> tuple[RunRecords | None, st
 
     raw_inner = group.get("inner")
     inner = None if raw_inner is None else int(raw_inner)
-    runs_dir = Path(cfg.paths.studies_dir) / str(named["study"]) / "runs" / str(named["experiment"]) / cohort.name
+    runs_dir = layout.runs_dir(cfg.paths.studies_dir, named["study"], named["experiment"], cohort.name)
     if not runs_dir.exists():
         sys.exit(f"\n[serve-slides] no such sweep: {runs_dir}")
     records = load_run_records(runs_dir, str(named["field"]), inner)
@@ -99,6 +101,9 @@ def _resolve_run(cfg: DictConfig, cohort: Cohort) -> tuple[RunRecords | None, st
     names = class_names(field_name, getattr(mapping, "categorical", None))
     which = "ensemble" if inner is None else f"i{inner}"
     return records, f"{named['experiment']}/{field_name} {which}", names
+
+
+register_resolvers()
 
 
 @hydra.main(version_base=None, config_path="../config", config_name="serve_slides")
@@ -118,13 +123,7 @@ def main(cfg: DictConfig) -> None:
     run, run_label, run_classes = _resolve_run(cfg, cohort)
 
     n_masked = sum(1 for e in entries if e.mask_path is not None)
-    logger.info(
-        "cohort %s: %d slides (%d with a mask) via %s",
-        cohort.name,
-        len(entries),
-        n_masked,
-        cohort.storage.default_reader,
-    )
+    logger.info("cohort %s: %d slides (%d with a mask)", cohort.name, len(entries), n_masked)
     in_study = None
     if run is not None:
         in_study = _in_study_slides(cfg, cohort, str(cfg.run.study), run)

@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Compile an ahcore ``DataDescription`` from a dlux ``Dataset`` + ``tiling``.
+"""Compile an ahcore ``DataDescription`` from a dlux ``Cohort`` + ``tiling``.
 
 Users author ``Cohort`` (locked cohort truth) and ``tiling`` (read geometry)
 separately. This assembles the ahcore ``DataDescription`` that DataManager /
@@ -40,7 +40,7 @@ def compile_data_description(
 ) -> DataDescription:
     """Build the ahcore ``DataDescription`` for ``cohort`` at the given ``tiling``.
 
-    ``database_uri`` is the study-derived DB location (``studies/<study>/db/<cohort>.db``),
+    ``database_uri`` is the study-derived DB location (``studies/<study>/db/<cohort>/manifest.db``),
     not carried by the cohort, since the same cohort is materialised differently per study.
     Geometry is deterministic here, fit-time tile sampling lives in the augmentations config,
     not the grid. Head size is resolved by the task, not carried on the data description.

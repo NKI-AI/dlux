@@ -9,7 +9,7 @@ authors:
     affiliation: The Netherlands Cancer Institute
     email: j.brunekreef@nki.nl
   - name: "AI for Oncology, The Netherlands Cancer Institute"
-version: 0.1.0
+version: 0.2.0
 license: Apache-2.0
 repository-code: "https://github.com/NKI-AI/dlux"
 url: "https://github.com/NKI-AI/dlux"

@@ -21,17 +21,20 @@ Lightning/ahcore machinery.
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass
+from typing import NamedTuple
 
 import numpy as np
 import pytest
 import torch
+
 from dlux.eval.predictions import collect_predictions, write_predictions_csv, write_predictions_npz
 
 
-@dataclass
-class _FakeSlideView:
+class _FakeSlideRef(NamedTuple):
+    """Shaped like ahcore's SlideRef, a named tuple."""
+
     slide_id: str
+    manifest_name: str
     patient_code: str
 
 
@@ -66,8 +69,8 @@ def _make_batches(labels_per_batch, feat_dim: int = 4):
     gid = 0
     for labels in labels_per_batch:
         b = len(labels)
-        svs = [_FakeSlideView(slide_id=f"s{gid + i}", patient_code=f"p{gid + i}") for i in range(b)]
-        batches.append({"features": torch.randn(b, feat_dim), "label": torch.tensor(labels), "slide_view": svs})
+        refs = [_FakeSlideRef(slide_id=f"s{gid + i}", manifest_name="m", patient_code=f"p{gid + i}") for i in range(b)]
+        batches.append({"features": torch.randn(b, feat_dim), "label": torch.tensor(labels), "slide_ref": refs})
         gid += b
     return batches
 

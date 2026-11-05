@@ -24,20 +24,23 @@ name: tcga_coad_regression
 cohorts:
   tcga_coad_molecular: development
 targets: [leukocyte_fraction]
-splits: { n_outer: 5, n_inner: 5, per_label: true, random_state: 42 }
+require_modalities: []
+splits: { n_outer: 5, n_inner: 5, random_state: 42 }
 ```
 
-**Experiment.** Swap the classification task for regression, and z-score the target per fold so the loss scale is stable:
+**Experiment.** Swap the classification task for regression, and z-score the target per fold so the loss scale is stable. The recipe keeps the tutorial's Phikon encoder, so extract the Phikon features for this cohort first, as in the tutorial:
 
 ```yaml
+# @package _global_
 defaults:
   - override /task: wsi_regression
+  - override /feature_extractor: phikon_tile
 experiment_name: baseline
 task:
   target_normalize: zscore
 ```
 
-Run the same stages as the tutorial. `aggregate` reports R² and Pearson correlation in place of AUROC.
+Run the same stages as the tutorial. `aggregate` reports R², Pearson and Spearman correlation, MAE and RMSE in place of AUROC.
 
 ## Multiclass: glioma WHO grade
 
@@ -59,7 +62,8 @@ name: tcga_gbmlgg_grade
 cohorts:
   tcga_gbmlgg: development
 targets: [grade]
-splits: { n_outer: 5, n_inner: 5, per_label: true, random_state: 42 }
+require_modalities: []
+splits: { n_outer: 5, n_inner: 5, random_state: 42 }
 ```
 
 **Experiment.** The default `wsi_classification` task reads the class count from the contract, so the recipe is the tutorial's baseline unchanged. `aggregate` reports multiclass accuracy and, because grade is ordered, quadratic-weighted kappa.
@@ -84,14 +88,17 @@ name: tcga_gbmlgg_survival
 cohorts:
   tcga_gbmlgg: development
 targets: [os]
-splits: { n_outer: 5, n_inner: 5, per_label: true, random_state: 42 }
+require_modalities: []
+splits: { n_outer: 5, n_inner: 5, random_state: 42 }
 ```
 
-**Experiment.** Select the survival task, which fits a discrete-time hazard model:
+**Experiment.** Select the survival task, which fits a discrete-time hazard model. As for regression, the recipe keeps the Phikon encoder:
 
 ```yaml
+# @package _global_
 defaults:
   - override /task: wsi_survival
+  - override /feature_extractor: phikon_tile
 experiment_name: baseline
 ```
 

@@ -24,6 +24,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+
 from dlux.modalities import MODALITIES, BulkRNA
 
 _MEANS = np.zeros(3, dtype=np.float32)
@@ -82,6 +83,6 @@ def test_unknown_policy_is_rejected():
         _rna(missing="drop")
 
 
-def test_old_impute_missing_key_points_at_the_new_spelling():
-    with pytest.raises(ValueError, match="missing: impute_mean"):
+def test_an_unknown_bulk_rna_option_is_refused():
+    with pytest.raises(ValueError, match=r"unknown option\(s\) \['impute_missing'\]"):
         BulkRNA.from_spec(key="bulk_rna", spec={"modality": "bulk_rna", "impute_missing": True}, ctx=None)

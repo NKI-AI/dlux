@@ -78,6 +78,8 @@ class TileFeatures:
         unknown = set(spec) - {"modality"}
         if unknown:
             raise ValueError(f"input '{key}' (tile_features): unknown option(s) {sorted(unknown)}")
+        if ctx.cohorts_dir is None:
+            raise ValueError(f"input '{key}' (tile_features) needs cohorts_dir to locate the feature cache")
         model_name, model_hash, feature_dim = cls.identify(ctx.feature_extractor)
         return cls(
             key=key,

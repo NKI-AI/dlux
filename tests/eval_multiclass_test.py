@@ -21,6 +21,7 @@ import json
 
 import numpy as np
 import pytest
+
 from dlux.eval.aggregate import aggregate_experiment, write_reports
 from dlux.eval.predictions import write_predictions_npz
 
@@ -46,6 +47,7 @@ def _write_multiclass_fold(runs_root, field, outer, inner, patient_probs, patien
         d / "test_predictions.npz",
     )
     meta = {"n_outer": grid[0], "n_inner": grid[1]} if grid else {}
+    meta["test_coverage"] = {"declared": 0, "scored": 0, "lost": []}
     (d / "metadata.json").write_text(json.dumps(meta))
 
 
@@ -137,8 +139,8 @@ def test_multiclass_write_reports(tmp_path):
     assert (out / "figures" / "confusion_cancer_type.png").exists()  # argmax at a fixed threshold
     assert (out / "figures" / "roc_cancer_type.png").exists()  # one-vs-rest, threshold-free
     assert (out / "figures" / "auroc_by_fold.png").exists()  # classification strip (macro AUROC)
-    assert (out / "predictions_cancer_type.csv").exists()  # per-patient per-class probs
-    with (out / "predictions_cancer_type.csv").open() as f:
+    assert (out / "per_patient_cancer_type.csv").exists()  # per-patient per-class probs
+    with (out / "per_patient_cancer_type.csv").open() as f:
         rows = list(csv.DictReader(f))
     assert len(rows) == 6 and {"prob_0", "prob_1", "prob_2", "pred", "label"} <= set(rows[0].keys())
     md = (out / "summary.md").read_text()

@@ -1,4 +1,4 @@
-# Generate tissue masks for a cohort's slides (dlux-native; runs before build_db). Reads the cohort's
+# Generate tissue masks for a cohort's slides (runs before build_db). Reads the cohort's
 # sheets/slides.csv, segments each slide with the HF tissue model, writes <stem>.mask.tiff under
 # output_dir, and records them in sheets/masks.csv itself. Point the cohort mask_dir at output_dir.
 defaults:
@@ -9,13 +9,13 @@ defaults:
   - _self_
   - optional local/paths: default
   - optional project/paths: default
-output_dir: ??? # where <stem>.mask.tiff are written (flat; matches the existing TCGA tissue_masks)
+output_dir: ??? # where <stem>.mask.tiff are written (flat)
 overwrite: false # re-generate masks that already exist
 hydra:
   # A consumer project supplies its own `catalog/` (cohorts, studies, experiments) and `config/`
-  # (custom tasks/models + its cohort paths). Both are search-path roots. Paths are relative to the
-  # process working directory (the repo root); set
-  # DLUX_PROJECT to a consumer project root (it supplies catalog/ and config/).
+  # (custom tasks/models + its cohort paths). Both are search-path roots. DLUX_PROJECT names the
+  # project; `dlux.project` resolves a relative value from the repository root and fails if either
+  # root is missing.
   searchpath:
-    - file://${oc.env:DLUX_PROJECT,.}/catalog
-    - file://${oc.env:DLUX_PROJECT,.}/config
+    - file://${dlux.project:}/catalog
+    - file://${dlux.project:}/config

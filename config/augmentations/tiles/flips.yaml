@@ -1,0 +1,6 @@
+# @package augmentations.tiles
+# Fit-time augmentation for the `tiles` input of a tile task: independent horizontal and vertical flips
+# per tile. A tile experiment selects it with `- /augmentations/tiles: flips` in its defaults.
+fit:
+  _target_: ahcore.augmentations.tile_image.TileImageAugmentation.for_classification
+  p: 0.5

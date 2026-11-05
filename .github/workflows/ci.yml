@@ -1,0 +1,52 @@
+name: CI
+on:
+  push:
+    # preflight/** is where a monorepo branch is published before it merges, so these
+    # checks run against it there rather than after the fact.
+    branches: [main, "preflight/**"]
+  pull_request:
+permissions:
+  contents: read
+env:
+  # The tests need no GPU, so install the CPU build of torch.
+  UV_TORCH_BACKEND: cpu
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+      - name: Ruff lint
+        run: uvx ruff@0.11.5 check .
+      - name: Ruff format check
+        run: uvx ruff@0.11.5 format --check .
+  typecheck:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+      - name: Install dlux with every extra
+        run: |
+          uv venv
+          uv pip install -e ".[all,dev]"
+      - name: Mypy
+        run: uv run mypy dlux bin tests
+  test:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install dlux with every extra
+        run: |
+          uv venv
+          uv pip install -e ".[all,dev]"
+      - name: Pytest
+        run: uv run pytest tests

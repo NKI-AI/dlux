@@ -45,7 +45,7 @@ Install dlux from a clone of this repo:
 
 ```bash
 git clone https://github.com/NKI-AI/dlux.git
-cd <repo>
+cd dlux
 python -m venv .venv && source .venv/bin/activate
 pip install .
 ```
@@ -68,7 +68,7 @@ The version in the URL may have moved on. macOS and Windows builds are on the sa
 
 ## Step 1. Point dlux at the example
 
-Set three env vars, then create the local paths file.
+Set three env vars.
 
 ```bash
 export DLUX_PROJECT=$PWD/examples                 # the example's catalog + config
@@ -76,12 +76,7 @@ export DLUX_EXAMPLE_DATA=/ABS/PATH/TO/tcga_data   # where you will download the 
 export DLUX_ROOT=/ABS/PATH/TO/your_dlux_outputs   # all dlux outputs: databases, caches, runs, results, models
 ```
 
-```bash
-mkdir -p examples/config/local/paths
-cp examples/local_paths.example.yaml examples/config/local/paths/default.yaml
-```
-
-That paths file just reads `DLUX_ROOT`, so there is nothing to edit. The tutorial uses `$DLUX_ROOT` for the outputs root from here on, and the model store lives at `$DLUX_ROOT/models`.
+dlux reads its output root from `DLUX_ROOT`. The tutorial uses `$DLUX_ROOT` for the outputs root from here on, and the model store lives at `$DLUX_ROOT/models`.
 
 ## Step 2. Bake the encoder
 
@@ -124,7 +119,7 @@ python examples/scripts/tcga_subtyping/build_sheets.py \
 
 ## Step 5. Generate masks
 
-`generate_masks` segments tissue with a public model, downloaded on first use.
+`generate_masks` segments tissue with a public model, downloaded on first use (needs the masks extra, `pip install '.[masks]'`).
 
 ```bash
 python bin/generate_masks.py cohort=tcga_brca_coad_christiana output_dir=$DLUX_EXAMPLE_DATA/christiana/masks
@@ -152,15 +147,15 @@ python bin/build_db.py study=tcga_subtyping cohort=tcga_brca_coad_christiana
 python bin/build_db.py study=tcga_subtyping cohort=tcga_brca_coad_mskcc
 ```
 
-`build_db` also writes a dataset summary to `$DLUX_ROOT/studies/tcga_subtyping/db/<cohort>_analysis/summary.md` — slide and patient counts, label balance, the nested-CV split composition, and figures. Open it to sanity-check a cohort before training.
+`build_db` also writes a dataset summary to `$DLUX_ROOT/studies/tcga_subtyping/db/<cohort>/analysis/summary.md` — slide and patient counts, label balance, the nested-CV split composition, and figures. Open it to sanity-check a cohort before training.
 
 ## Step 7. Extract features
 
 Cache Phikon tile features for both cohorts. `feature_extractor=phikon_tile` is required, because the built-in default points at a different encoder.
 
 ```bash
-python bin/extract_features.py study=tcga_subtyping cohort=tcga_brca_coad_christiana feature_extractor=phikon_tile tiling=uni2_2mpp
-python bin/extract_features.py study=tcga_subtyping cohort=tcga_brca_coad_mskcc      feature_extractor=phikon_tile tiling=uni2_2mpp
+python bin/extract_features.py study=tcga_subtyping cohort=tcga_brca_coad_christiana feature_extractor=phikon_tile tiling=2mpp_224
+python bin/extract_features.py study=tcga_subtyping cohort=tcga_brca_coad_mskcc      feature_extractor=phikon_tile tiling=2mpp_224
 ```
 
 A GPU is strongly preferred here. Otherwise the extractor uses torch to select the best available accelerator.
@@ -175,7 +170,7 @@ Train the development cohort. The grid is 3 outer folds by 2 inner folds, so six
 for fold in 0 1 2 3 4 5; do
   python bin/train.py \
     study=tcga_subtyping cohort=tcga_brca_coad_christiana \
-    experiment=tcga_subtyping/baseline feature_extractor=phikon_tile \
+    experiment=tcga_subtyping/baseline \
     task.target.field=cancer_type fold=$fold
 done
 ```
@@ -204,6 +199,26 @@ Score the trained models on MSKCC, the center they never trained on.
 python bin/evaluate_external.py study=tcga_subtyping cohort=tcga_brca_coad_mskcc experiment_name=baseline
 ```
 
+## Optional: train on raw tiles
+
+dlux can also train on the tiles themselves, without a foundation model. The `tile_cnn` experiment trains an ImageNet ResNet18 per tile: every tile gets its patient's label, and each slide is scored as the mean of its tile probabilities. It reads a tile cache, which `extract_tiles` builds once per cohort at the experiment's tiling.
+
+```bash
+python bin/extract_tiles.py study=tcga_subtyping cohort=tcga_brca_coad_christiana
+python bin/extract_tiles.py study=tcga_subtyping cohort=tcga_brca_coad_mskcc
+
+for fold in 0 1 2 3 4 5; do
+  python bin/train.py \
+    study=tcga_subtyping cohort=tcga_brca_coad_christiana \
+    experiment=tcga_subtyping/tile_cnn task.target.field=cancer_type fold=$fold
+done
+
+python bin/aggregate.py study=tcga_subtyping cohort=tcga_brca_coad_christiana experiment_name=tile_cnn
+python bin/evaluate_external.py study=tcga_subtyping cohort=tcga_brca_coad_mskcc experiment_name=tile_cnn
+```
+
+A tile model trains on every tile of every slide, so it needs a GPU and takes much longer than the feature-based baseline.
+
 ## Read the results
 
 Outputs land under `$DLUX_ROOT/studies/tcga_subtyping/`.
@@ -223,7 +238,7 @@ Open <http://127.0.0.1:8000>. Each slide shows the model's attention over its ti
 
 ## Scaling up to a serious run
 
-The pinned set is 15 slides per class per center. That's enough to watch the pipeline run end to end, but not enough for a result you would trust. For a real subtyping run, regenerate the manifests with more slides, or with every available slide, as the [manifests README](../../examples/scripts/tcga_subtyping/manifests/README.md) describes. Then re-run the pipeline from Step 3, since the new manifests mean a fresh download. With more patients per fold you also raise the split grid (`n_outer`, `n_inner`) in the study and the batch size in the experiment, as that README notes. The stages themselves do not change. The download and mask-generation/feature extraction just take longer.
+The pinned set is 15 slides per class per center. That's enough to watch the pipeline run end to end, but not enough for a result you would trust. For a real subtyping run, regenerate the manifests with more slides, or with every available slide, as the [manifests README](../../examples/scripts/tcga_subtyping/manifests/README.md) describes. Then re-run the pipeline from Step 3, since the new manifests mean a fresh download. With more patients per fold you also raise the split grid (`n_outer`, `n_inner`) in the study and the batch size in the experiment, as that README notes. The stages themselves do not change. Use a new `DLUX_ROOT` for the larger run: `build_db` refuses to replace an existing DB, and `train` skips every fold the small run already finished. The download and mask-generation/feature extraction just take longer.
 
 ## Notes
 

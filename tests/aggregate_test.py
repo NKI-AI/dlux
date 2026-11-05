@@ -14,7 +14,7 @@
 """Driver tests for dlux.eval.aggregate: fold discovery, completeness/grid guards, the shared-TEST
 invariant, the scalar outer-fold ensemble + rollup, and the report skeleton — exercised through the
 binary endpoint as the reference scalar vehicle. The per-objective aggregation + reporting tests live
-in eval_{regression,multiclass,survival,expression}_test.py (mirroring dlux/eval/<objective>.py).
+in eval_{regression,multiclass,survival,regression_vector}_test.py (mirroring dlux/eval/<objective>.py).
 
 Synthetic per-fold artifacts are written with the REAL NPZ writer (schema fidelity) into a
 temp runs tree, each gated by a metadata.json sentinel — exactly what a sweep leaves behind.
@@ -27,12 +27,15 @@ import json
 
 import numpy as np
 import pytest
+
+from dlux.data import layout
 from dlux.eval.aggregate import aggregate_experiment, write_reports
+from dlux.eval.compare import read_arm
 from dlux.eval.predictions import write_predictions_npz
 
 
 def _declare(fields=("cancer_type",), n_outer=2, n_inner=2) -> dict:
-    """What the study declares — aggregate now takes the expected shape from config, not from disk."""
+    """What the study declares: aggregate takes the expected shape from config, not from disk."""
     return {"expected_fields": list(fields), "n_outer": n_outer, "n_inner": n_inner}
 
 
@@ -53,7 +56,7 @@ def _write_fold(
 
     One slide per patient. ``patient_probs`` maps patient_code -> positive-class prob. ``grid``
     (n_outer, n_inner) stamps the expected CV shape into metadata for the strict check. ``coverage``
-    stamps this fold's declared-vs-scored TEST patients; omitting it is what a pre-record run looks like.
+    stamps this fold's declared-vs-scored TEST patients, every patient scored when not given.
     """
     d = runs_root / f"{field}_cv_o{outer}_i{inner}"
     d.mkdir(parents=True)
@@ -73,8 +76,7 @@ def _write_fold(
     write_predictions_npz(preds, d / "test_predictions.npz")
     if complete:
         meta = {"n_outer": grid[0], "n_inner": grid[1]} if grid else {}
-        if coverage is not None:
-            meta["test_coverage"] = coverage
+        meta["test_coverage"] = coverage or {"declared": len(pcs), "scored": len(pcs), "lost": []}
         (d / "metadata.json").write_text(json.dumps(meta))
 
 
@@ -137,7 +139,9 @@ def test_slide_rollup_mean(tmp_path):
         "target_key": "patient.cancer_type",
     }
     write_predictions_npz(preds, d / "test_predictions.npz")
-    (d / "metadata.json").write_text(json.dumps({"n_outer": 1, "n_inner": 1}))
+    (d / "metadata.json").write_text(
+        json.dumps({"n_outer": 1, "n_inner": 1, "test_coverage": {"declared": 2, "scored": 2, "lost": []}})
+    )
 
     (results,) = aggregate_experiment(tmp_path, **_declare(n_outer=1, n_inner=1))
     p0 = next(p for p in results.patient_predictions if p.patient_code == "p0")
@@ -180,12 +184,12 @@ def test_strict_raises_on_missing_fold_with_grid(tmp_path):
 
 
 def test_missing_grid_stamp_raises(tmp_path):
-    """A fold lacking the CV grid violates the contract -> refused (no legacy fallback), even non-strict."""
+    """A fold lacking the CV grid violates the contract -> refused, even non-strict."""
     labels = {"p0": 1, "p1": 0}
-    _write_fold(tmp_path, "cancer_type", 0, 0, {"p0": 0.9, "p1": 0.1}, labels)  # grid=None -> metadata "{}"
-    with pytest.raises(ValueError, match="missing the CV grid"):
+    _write_fold(tmp_path, "cancer_type", 0, 0, {"p0": 0.9, "p1": 0.1}, labels)  # grid=None -> no n_outer/n_inner
+    with pytest.raises(ValueError, match=r"lacks \['n_inner', 'n_outer'\]"):
         aggregate_experiment(tmp_path, **_declare())
-    with pytest.raises(ValueError, match="missing the CV grid"):
+    with pytest.raises(ValueError, match=r"lacks \['n_inner', 'n_outer'\]"):
         aggregate_experiment(
             tmp_path, **_declare(), strict=False
         )  # the grid is a contract requirement, not a strictness knob
@@ -210,7 +214,8 @@ def _write_vector_fold(runs_root, field, outer, inner, patients, *, n_genes=4, g
         },
         d / "test_predictions.npz",
     )
-    (d / "metadata.json").write_text(json.dumps({"n_outer": grid[0], "n_inner": grid[1]}))
+    covered = {"declared": len(patients), "scored": len(patients), "lost": []}
+    (d / "metadata.json").write_text(json.dumps({"n_outer": grid[0], "n_inner": grid[1], "test_coverage": covered}))
 
 
 def _expression_sweep(root, *, skip=()):
@@ -226,8 +231,7 @@ def _expression_sweep(root, *, skip=()):
 def test_strict_raises_on_incomplete_random_baseline(tmp_path):
     """The null feeds a REPORTED statistic, so it is held to the declared grid like the trained arm.
 
-    Checking only "does the random dir have any folds at all" let a short null through silently and
-    changed the trained-vs-random gene count without saying so."""
+    A short null would silently change the trained-vs-random gene count."""
     trained, random_dir = tmp_path / "trained", tmp_path / "random"
     _expression_sweep(trained)
     _expression_sweep(random_dir, skip={(0, 1)})
@@ -249,6 +253,16 @@ def test_complete_random_baseline_passes(tmp_path):
     assert res.n_outer_folds == 2
 
 
+def test_a_random_baseline_over_other_patients_is_refused(tmp_path):
+    trained, random_dir = tmp_path / "trained", tmp_path / "random"
+    _expression_sweep(trained)
+    for o, patients in ((0, [f"p{i}" for i in range(6)]), (1, [f"r{i}" for i in range(6)])):
+        for i in (0, 1):
+            _write_vector_fold(random_dir, "expression", o, i, patients)
+    with pytest.raises(ValueError, match="the random baseline scores other patients than the trained sweep"):
+        aggregate_experiment(trained, **_declare(fields=("expression",)), random_experiment_dir=random_dir)
+
+
 def test_strict_passes_on_complete_grid(tmp_path):
     labels = {"p0": 1, "p1": 0, "p2": 1, "p3": 0}
     for o, i in [(0, 0), (0, 1), (1, 0), (1, 1)]:
@@ -259,9 +273,9 @@ def test_strict_passes_on_complete_grid(tmp_path):
 
 
 def test_a_declared_endpoint_with_zero_folds_is_an_error(tmp_path):
-    """The hole that motivated S5a. An endpoint whose every fold failed is simply ABSENT from discovery,
-    so a completeness check driven by the data cannot see it — the report came out looking clean. Only
-    the study's declaration knows it should have been there."""
+    """An endpoint whose every fold failed is simply ABSENT from discovery, so a completeness check driven
+    by the data cannot see it, and the report would look clean. Only the study's declaration knows it
+    should be there."""
     labels = {"p0": 1, "p1": 0}
     for o in (0, 1):
         for i in (0, 1):
@@ -292,7 +306,7 @@ def test_an_undeclared_endpoint_on_disk_is_not_aggregated(tmp_path):
 
 def test_a_grid_mismatch_between_sweep_and_study_is_an_error(tmp_path):
     """The folds stamp the grid they ran on; the study declares the grid it wants. Disagreement means the
-    config changed mid-sweep, which nothing caught before."""
+    config changed mid-sweep, so aggregate refuses it."""
     labels = {"p0": 1, "p1": 0}
     _write_fold(tmp_path, "cancer_type", 0, 0, {"p0": 0.9, "p1": 0.1}, labels, grid=(1, 1))
     with pytest.raises(ValueError, match="but the study declares 2x2"):
@@ -305,8 +319,12 @@ def test_write_reports_produces_files(tmp_path):
     _two_fold_sweep(runs)
     results = aggregate_experiment(runs, **_declare())
 
-    out = write_reports(results, "exp_v1", tmp_path / "results")
-    assert (out / "per_patient_ensemble.csv").exists()
+    out = write_reports(results, "exp_v1", layout.results_dir(tmp_path, "s", "exp_v1", "c"))
+    assert (out / "per_patient_cancer_type.csv").exists()
+    # The NPZ is the record compare reads: the same patients, folds and predictions as the result.
+    (arm,) = read_arm(tmp_path, "s", "exp_v1", "c", "binary").values()
+    by_patient = {p.patient_code: (p.outer_fold, p.ensemble_prob) for p in results[0].patient_predictions}
+    assert {code: (row[0], float(row[1])) for code, row in arm.items()} == by_patient
     assert (out / "per_fold_metrics.csv").exists()
     assert (out / "summary.md").exists()
     assert (out / "figures" / "roc_cancer_type.png").exists()
@@ -342,13 +360,6 @@ def test_coverage_sums_over_outer_folds_not_over_replicates(tmp_path):
     assert res.coverage == {"declared": 6, "scored": 4, "lost": ["lost_a", "lost_b"]}
 
 
-def test_coverage_is_unknown_when_any_fold_predates_the_record(tmp_path):
-    """A partial union would understate the loss, and an understated loss reads as full coverage."""
-    _sweep_with_coverage(tmp_path, {"declared": 3, "scored": 2, "lost": ["lost_a"]}, None)
-    (res,) = aggregate_experiment(tmp_path, **_declare())
-    assert res.coverage is None
-
-
 def test_summary_states_the_coverage_gap(tmp_path):
     runs = tmp_path / "runs"
     runs.mkdir()
@@ -370,9 +381,36 @@ def test_summary_is_silent_when_coverage_is_total(tmp_path):
     assert "declared TEST patients scored" not in (out / "summary.md").read_text()
 
 
-def test_summary_flags_unknown_coverage(tmp_path):
+def test_a_fold_without_recorded_coverage_is_refused(tmp_path):
     runs = tmp_path / "runs"
     runs.mkdir()
-    _two_fold_sweep(runs)  # no coverage stamped anywhere
-    out = write_reports(aggregate_experiment(runs, **_declare()), "exp_v1", tmp_path / "results")
-    assert "Coverage unknown" in (out / "summary.md").read_text()
+    _two_fold_sweep(runs)
+    meta_path = runs / "cancer_type_cv_o0_i0" / "metadata.json"
+    meta = json.loads(meta_path.read_text())
+    del meta["test_coverage"]
+    meta_path.write_text(json.dumps(meta))
+    with pytest.raises(ValueError, match=r"lacks \['test_coverage'\]"):
+        aggregate_experiment(runs, **_declare())
+
+
+def test_per_fold_metrics_keep_each_objectives_values_under_their_own_names(tmp_path):
+    from dlux.config.cohort import Objective
+    from dlux.eval._common import AggregateResult, OuterFoldMetric
+    from dlux.eval.aggregate import _handler, _write_per_fold_csv
+
+    def _result(field, objective):
+        keys = _handler(objective).model.metric_labels
+        fold = OuterFoldMetric(field, 0, 4, 2, {k: 0.5 for k in keys})
+        return AggregateResult(field, objective, [], [fold], {}, {}, {}, 4, 2, 1, {0: 1})
+
+    path = tmp_path / "per_fold_metrics.csv"
+    _write_per_fold_csv([_result("er", Objective.binary), _result("ki67", Objective.regression)], path)
+
+    with path.open() as f:
+        rows = {row["field"]: row for row in csv.DictReader(f)}
+    for field, objective in (("er", Objective.binary), ("ki67", Objective.regression)):
+        keys = set(_handler(objective).model.metric_labels)
+        assert all(rows[field][k] == "0.500000" for k in keys)
+        assert all(
+            rows[field][k] == "" for k in set(rows[field]) - keys - {"field", "outer_fold", "n_patients", "n_positive"}
+        )

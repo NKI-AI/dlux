@@ -14,7 +14,7 @@
 """Compare resplit arms against a measured noise floor.
 
     compare_resplits study=tcga_subtyping cohort=tcga_brca_coad_christiana \
-        comparison=tcga_subtyping/meanmil resplit_name=meanmil task.target.field=cancer_type
+        comparison=tcga_subtyping/meanmil resplit_name=meanmil
 
 Stage 2 of ``docs/specs/COMPARE_SPEC.md``. ``compare`` judges paired per-fold deltas from one nested-CV
 sweep against the fold SEM. This judges R independent random splits against training noise measured on
@@ -23,7 +23,9 @@ the same splits.
 Reads only the rows ``train_resplit`` persisted under
 ``studies/<study>/resplits/<resplit_name>/<cohort>/rows/`` (rows are field-tagged, so one sweep holds
 every endpoint). Nothing is loaded, re-run or re-fitted. Output is written to
-``.../results/<comparison_name>/<field>/``, per-field, so one comparison config serves every endpoint.
+``studies/<study>/comparisons/<comparison_name>/resplit_<resplit_name>/<field>/``, per field, beside
+``compare``'s ``nested_cv/``. ``fields`` narrows the endpoints, and by default every
+endpoint the rows hold is compared.
 
 Reuses ``compare``'s ``comparison=<study>/<name>`` config. The arms and reference are the same question
 at a different level of rigour, so they are not restated.
@@ -32,12 +34,19 @@ at a different level of rigour, so they are not restated.
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 
 import hydra
+from hydra.core.hydra_config import HydraConfig
+from omegaconf import DictConfig, OmegaConf
+from pydantic import ValidationError
+
+from ahcore.utils.io import get_logger, print_config
+
 from dlux.config.cohort import Cohort, Study
+from dlux.config.resolvers import register_resolvers
+from dlux.data import layout
 from dlux.data.errors import BuildDbError
-from dlux.eval.compare import resolve_metric
+from dlux.eval.compare import check_comparison_choice, resolve_metric
 from dlux.eval.resplit import (
     check_invariants,
     compare_resplits,
@@ -45,12 +54,10 @@ from dlux.eval.resplit import (
     summarize_arm,
     write_resplit_comparison,
 )
-from omegaconf import DictConfig, OmegaConf
-from pydantic import ValidationError
-
-from ahcore.utils.io import get_logger, print_config
 
 logger = get_logger(__name__)
+
+register_resolvers()
 
 
 @hydra.main(version_base=None, config_path="../config", config_name="compare_resplits")
@@ -68,38 +75,51 @@ def main(cfg: DictConfig) -> None:
             f"(has: {sorted(study.cohorts)})."
         )
 
-    target = str(cfg.task.target.field)
-    if target not in cohort.contract:
-        sys.exit(f"\n[compare_resplits] '{target}' is not an endpoint of cohort '{cohort.name}'.")
-    objective = cohort.contract[target].objective.value
+    try:
+        check_comparison_choice(HydraConfig.get().runtime.choices["comparison"], str(cfg.comparison_name), study.name)
+    except BuildDbError as exc:
+        sys.exit(f"\n[compare_resplits] {exc}")
 
     resplit_name = str(cfg.resplit_name)
-    base = Path(cfg.paths.studies_dir) / study.name / "resplits" / resplit_name / cohort.name
     arms = list(OmegaConf.to_container(cfg.arms, resolve=True))  # type: ignore[arg-type]
     reference = str(cfg.reference)
 
     try:
-        trials = read_rows(base / "rows")
+        trials = read_rows(layout.resplit_rows_dir(cfg.paths.studies_dir, study.name, resplit_name, cohort.name))
         notes = check_invariants(trials)
+    except BuildDbError as exc:
+        sys.exit(f"\n[compare_resplits] {exc}")
+    # The rows are field-tagged, so one sweep holds every endpoint it trained.
+    fields = list(OmegaConf.to_container(cfg.fields, resolve=True)) if cfg.get("fields") else None  # type: ignore[arg-type]
+    for field in fields or sorted({t.field for t in trials}):
+        _compare_field(cfg, study.name, cohort, trials, notes, field, arms=arms, reference=reference)
+
+
+def _compare_field(cfg, study_name, cohort, trials, notes, field, *, arms, reference) -> None:
+    if field not in cohort.contract:
+        sys.exit(f"\n[compare_resplits] '{field}' is not an endpoint of cohort '{cohort.name}'.")
+    objective = cohort.contract[field].objective.value
+    field_trials = [t for t in trials if t.field == field]
+    try:
         # The metric is baked into the stored rows by the sweep. Read which one it was from the rows (they
         # must agree) rather than re-choosing here, so the report can never mislabel what was scored.
-        metric_keys = {t.metric_key for t in trials}
+        metric_keys = {t.metric_key for t in field_trials}
         if len(metric_keys) > 1:
-            sys.exit(f"\n[compare_resplits] rows mix metrics {sorted(k or 'default' for k in metric_keys)}.")
-        spec = resolve_metric(objective, metric_keys.pop())
+            sys.exit(f"\n[compare_resplits] '{field}' rows mix metrics {sorted(k or 'default' for k in metric_keys)}.")
+        spec = resolve_metric(objective, metric_keys.pop() if metric_keys else None)
         comparison = compare_resplits(
-            trials,
+            field_trials,
             arms=arms,
             reference=reference,
-            field_name=target,
+            field_name=field,
             metric_name=spec.label,
         )
     except BuildDbError as exc:
         sys.exit(f"\n[compare_resplits] {exc}")
 
-    out_dir = (
-        base / "results" / str(cfg.comparison_name) / target
-    )  # per-field: one comparison config serves every endpoint
+    out_dir = layout.resplit_comparison_dir(
+        cfg.paths.studies_dir, study_name, cfg.comparison_name, cfg.resplit_name, field
+    )
     summary = write_resplit_comparison(comparison, str(cfg.comparison_name), out_dir, notes=notes, chance=spec.chance)
 
     margin = comparison.margin

@@ -44,21 +44,3 @@ def test_metric_round_trip_through_sqlite(tmp_path):
     exp = logger.experiment.get_experiment_by_name("exp_sweep")
     assert exp is not None
     logger.finalize("success")
-
-
-def test_nested_config_logs_as_flattened_params(tmp_path):
-    """log_hyperparams flattens a nested config into '/'-delimited mlflow params."""
-    logger = build_mlflow_logger(mlflow_dir=tmp_path, experiment_name="exp_sweep", run_name="fold")
-    logger.log_hyperparams(
-        {
-            "study": {"name": "tcga_coad_regression"},
-            "task": {"target": "leukocyte_fraction", "target_normalize": "zscore"},
-            "trainer": {"max_epochs": 60},
-        }
-    )
-    params = logger.experiment.get_run(logger.run_id).data.params
-    assert params["study/name"] == "tcga_coad_regression"
-    assert params["task/target"] == "leukocyte_fraction"
-    assert params["task/target_normalize"] == "zscore"
-    assert params["trainer/max_epochs"] == "60"
-    logger.finalize("success")

@@ -12,5 +12,4 @@ require_modalities: []
 splits:
   n_outer: 3
   n_inner: 2
-  per_label: true
   random_state: 42

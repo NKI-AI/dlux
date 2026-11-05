@@ -1,0 +1,15 @@
+# @package _global_
+# Subtyping from raw tiles instead of foundation-model features: an ImageNet ResNet18 trained per tile,
+# with every tile labelled with its patient's cancer type. Each slide is scored at eval as the mean of its
+# tile probabilities. Build the tile cache first with bin/extract_tiles.py at the same tiling (2mpp_224).
+defaults:
+  - /augmentations/tiles: flips
+  - override /task: tile_classification
+  - override /lit_module: tile_cnn
+  - override /augmentations/tile_features: null
+experiment_name: tile_cnn
+datamodule:
+  batch_size: 64
+  eval_batch_size: 128
+trainer:
+  max_epochs: 3

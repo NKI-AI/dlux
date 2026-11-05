@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 
 import pytest
+
 from dlux.eval.persistence import (
     claim_hydra_run_dir,
     persist_run_artifacts,
@@ -80,14 +81,12 @@ def test_persist_copies_and_writes_sentinel_last(tmp_path):
         artifacts={
             "best.ckpt": src / "best.ckpt",
             "test_predictions.npz": src / "test_predictions.npz",
-            "missing.csv": src / "does_not_exist.csv",  # warned, not fatal
         },
         metadata={"experiment_name": "exp", "split_version": "s0", "auroc": 0.94},
         force=False,
     )
     assert (run_dir / "best.ckpt").read_bytes() == b"weights"
     assert (run_dir / "test_predictions.npz").exists()
-    assert not (run_dir / "missing.csv").exists()
     meta = json.loads((run_dir / "metadata.json").read_text())
     assert meta["auroc"] == 0.94
 
@@ -109,3 +108,19 @@ def test_persist_force_clears_existing(tmp_path):
     assert not (run_dir / "stale.txt").exists()  # cleared by force
     assert (run_dir / "best.ckpt").exists()
     assert (run_dir / "metadata.json").exists()
+
+
+def test_persist_refuses_a_missing_artifact_and_writes_nothing(tmp_path):
+    src = tmp_path / "eph"
+    src.mkdir()
+    (src / "hparams.yaml").write_text("a: 1")
+    run_dir = tmp_path / "canonical"
+
+    with pytest.raises(FileNotFoundError, match="best.ckpt"):
+        persist_run_artifacts(
+            run_dir=run_dir,
+            artifacts={"hparams.yaml": src / "hparams.yaml", "best.ckpt": src / "best.ckpt"},
+            metadata={"ok": True},
+            force=False,
+        )
+    assert not run_dir.exists()

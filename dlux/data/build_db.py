@@ -45,12 +45,13 @@ from ahcore.manifest import (
     open_db,
     read_imageio_annotation,
 )
+from ahcore.utils.remote import is_remote_reader
 from dlup import ImageConfig, MaskConfig, TilingConfig
 from dlup.data.dataset import SlideDataset
 from dlup.utils.backends import ImageBackend
 
 from dlux.config.cohort import Cohort, Objective, SplitCategory, Splits, StratifyMethod
-from dlux.data import sheets
+from dlux.data import layout, sheets
 from dlux.data.errors import BuildDbError
 from dlux.data.splits import (
     continuous_cuts,
@@ -101,16 +102,22 @@ def _geometry(slide_image) -> dict[str, float]:
 
 
 def _probe_slide(
-    slide_path: Path, reader: str, mode: ProbeMode, mask_path: Optional[Path], grid: dict
+    slide_path: "str | Path", reader: str, mode: ProbeMode, mask_path: Optional[Path], grid: dict
 ) -> Optional[dict[str, float]]:
-    """Open/validate a slide and return its geometry. None on failure (logged)."""
+    """Open/validate a slide and return its geometry. None on failure (logged).
+
+    ``slide_path`` is a local path for a local reader, or a verbatim URL for a remote one (dlup opens
+    the URL itself; ``Path()`` would corrupt it)."""
     try:
         image_config = ImageConfig(backend=ImageBackend[reader], apply_color_profile=False)
         if mode == ProbeMode.metadata:
-            dataset = SlideDataset.from_standard_tiling(
-                path=slide_path, tiling_config=_METADATA_TILING, image_config=image_config
-            )
-            return _geometry(dataset.slide_image)
+            with (
+                SlideDataset.from_standard_tiling(
+                    path=slide_path, tiling_config=_METADATA_TILING, image_config=image_config
+                ) as dataset,
+                dataset.slide_image as slide_image,
+            ):
+                return _geometry(slide_image)
 
         # full: parse the mask (if any), build the real grid, require it to be non-empty.
         mask_config = None
@@ -120,18 +127,19 @@ def _probe_slide(
             mask_config = MaskConfig(
                 mask=read_imageio_annotation(mask_path), mask_threshold=grid["mask_threshold"], crop=False
             )
-        dataset = SlideDataset.from_standard_tiling(
+        with SlideDataset.from_standard_tiling(
             path=slide_path,
             tiling_config=TilingConfig(
                 mpp=grid["mpp"], tile_size=tuple(grid["tile_size"]), tile_overlap=tuple(grid["tile_overlap"])
             ),
             mask_config=mask_config,
             image_config=image_config,
-        )
-        if len(dataset) == 0:
-            print(f"[build_db] full probe: empty grid for {slide_path}")
-            return None
-        return _geometry(dataset.slide_image)
+        ) as dataset:
+            if len(dataset) == 0:
+                print(f"[build_db] full probe: empty grid for {slide_path}")
+                return None
+            with dataset.slide_image as slide_image:
+                return _geometry(slide_image)
     except Exception as exc:  # noqa: BLE001, per-slide failures are skipped, not fatal
         print(f"[build_db] probe failed for {slide_path}: {exc}")
         return None
@@ -156,7 +164,7 @@ class _BuildCtx:
 
 # -- endpoint builders (dispatched on objective via _BUILDERS) ---------------
 # A builder owns one endpoint kind's build-time contributions: fold-invariant provenance stats
-# (written to the sidecar json) and patient coverage (fed to split generation). None from either
+# (written to contract_stats.json) and patient coverage (fed to split generation). None from either
 # means "this endpoint contributes nothing to that artifact".
 class _SheetBuilder:
     """Central sheet-tabular endpoints: resolve fold-invariant target transform statistics.
@@ -173,9 +181,11 @@ class _SheetBuilder:
         values = []
         for row in ctx.patient_labels.values():
             raw = row.get(column)
+            if raw is None:
+                continue
             try:
                 parsed = float(raw)
-            except (TypeError, ValueError):
+            except ValueError:
                 continue
             if not math.isnan(parsed):
                 values.append(parsed)
@@ -292,7 +302,7 @@ def _apply_admin_censoring(patients: pd.DataFrame, cohort: Cohort, admin_censor:
 def build_db(
     cohort: Cohort,
     splits: Splits,
-    database_uri: str,
+    out_dir: Path,
     patients_csv: Path,
     slides_csv: Path,
     probe: str = "metadata",
@@ -312,15 +322,11 @@ def build_db(
         if not csv_path.exists():
             raise BuildDbError(f"{label} not found: {csv_path}")
 
-    db_path = Path(database_uri.replace("sqlite:///", ""))
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    if db_path.exists():
-        if not overwrite:
-            raise BuildDbError(
-                f"database already exists: {db_path}. Pass overwrite=true to replace it, or point at a new path."
-            )
-        print(f"[build_db] overwrite=true → removing existing {db_path}")
-        db_path.unlink()
+    out_dir = Path(out_dir)
+    if out_dir.exists() and not overwrite:
+        raise BuildDbError(
+            f"database already exists: {out_dir}. Pass overwrite=true to replace it, or point at a new path."
+        )
 
     patients = sheets.read_patients(patients_csv)
     slides = sheets.read_slides(slides_csv)
@@ -339,134 +345,152 @@ def build_db(
     has_reader_column = sheets.READER in slides.columns
     has_staining_column = sheets.STAINING in slides.columns
 
-    with open_db(database_uri, ensure_exists=False) as session:
-        manifest = Manifest(name=cohort.name)
-        session.add(manifest)
-        session.flush()
-
-        patient_cache: dict[str, Patient] = {}
-        patient_labels: dict[str, dict[str, str]] = {}
-        for _, row in tqdm(patients.iterrows(), total=len(patients), desc="patients"):
-            code = str(row[sheets.PATIENT_ID])
-            patient = Patient(patient_code=code, manifest=manifest)
-            session.add(patient)
-            session.flush()
-            patient_cache[code] = patient
-            values: dict[str, str] = {}
-            for column in label_columns:
-                value = row[column]
-                if _is_missing(value):
-                    continue
-                session.add(PatientLabels(key=column, value=str(value), patient=patient))
-                values[column] = str(value)
-            patient_labels[code] = values
-
-        ctx = _BuildCtx(
-            patient_labels=patient_labels,
-            manifest_codes=set(patient_labels),
-            cohort_name=cohort.name,
-            cohorts_dir=Path(cohorts_dir) if cohorts_dir is not None else None,
-        )
-        # Resolve target-defining population stats once (binarize threshold / target zscore μ,σ).
-        contract_stats = _resolve_provenance(cohort, ctx)
-
-        n_slides = 0
-        slide_desc = f"slides ({mode.value} probe)" if mode != ProbeMode.none else "slides"
-        for _, row in tqdm(slides.iterrows(), total=len(slides), desc=slide_desc):
-            code = str(row[sheets.PATIENT_ID])
-            patient = patient_cache[code]
-            image_rel = str(row[sheets.IMAGE_PATH])
-
-            reader = cohort.storage.default_reader
-            if has_reader_column and not _is_missing(row.get(sheets.READER)):
-                reader = str(row[sheets.READER]).upper()
-
-            staining = cohort.storage.default_staining
-            if has_staining_column and not _is_missing(row.get(sheets.STAINING)):
-                staining = str(row[sheets.STAINING])
-
-            mask_rel = masks_by_image.get(image_rel)
-            has_mask = mask_dir is not None and not _is_missing(mask_rel)
-            mask_full = (mask_dir / str(mask_rel)) if has_mask else None
-
-            geometry: dict[str, Optional[float]] = {"height": None, "width": None, "mpp": None}
-            if mode != ProbeMode.none:
-                probed = _probe_slide(image_dir / image_rel, reader, mode, mask_full, grid)
-                if probed is None:
-                    print(f"[build_db] skipping slide (probe failed): {image_rel}")
-                    continue
-                geometry = probed  # type: ignore[assignment]
-
-            image = Image(filename=image_rel, reader=reader, staining=staining, patient=patient, **geometry)
-            session.add(image)
+    # The whole cohort folder is written under a temporary name and replaces the old one only when it is
+    # complete, so a failed build leaves the previous build as it was, and no file of it survives a rebuild.
+    if out_dir.exists():
+        print(f"[build_db] overwrite=true → replacing {out_dir}")
+    with layout.replaced_dir(out_dir) as partial:
+        with open_db(f"sqlite:///{layout.manifest_db(partial)}", ensure_exists=False) as session:
+            manifest = Manifest(name=cohort.name)
+            session.add(manifest)
             session.flush()
 
-            for column in slides.columns:
-                if column in sheets.RESERVED_SLIDE_COLUMNS:
-                    continue
-                value = row[column]
-                if _is_missing(value):
-                    continue
-                session.add(ImageLabels(key=column, value=str(value), image=image))
+            patient_cache: dict[str, Patient] = {}
+            patient_labels: dict[str, dict[str, str]] = {}
+            for _, row in tqdm(patients.iterrows(), total=len(patients), desc="patients"):
+                code = str(row[sheets.PATIENT_ID])
+                patient = Patient(patient_code=code, manifest=manifest)
+                session.add(patient)
+                session.flush()
+                patient_cache[code] = patient
+                values: dict[str, str] = {}
+                for column in label_columns:
+                    value = row[column]
+                    if _is_missing(value):
+                        continue
+                    session.add(PatientLabels(key=column, value=str(value), patient=patient))
+                    values[column] = str(value)
+                patient_labels[code] = values
 
-            if has_mask:
-                session.add(Mask(filename=str(mask_rel), reader="IMAGEIO", image=image))
-            n_slides += 1
-
-        session.flush()
-
-        rnaseq_covered = _resolve_coverage(cohort, ctx)
-        require_coverage = _resolve_require_coverage(splits.require_modalities, ctx)
-        if import_splits is not None:
-            # Predefined split: write the supplied assignment verbatim instead of drawing one. The split
-            # math (generate_splits) is untouched and stays the default; this only swaps the source.
-            versions = import_splits_csv(import_splits)
-            valid_by_field = valid_patients_by_field(cohort, patient_labels, rnaseq_covered, require_coverage)
-            versions = validate_imported_splits(
-                versions,
-                splits,
-                cohort_patients=set(patient_cache),
-                valid_by_field=valid_by_field,
-                allow_uncovered=import_allow_uncovered,
+            ctx = _BuildCtx(
+                patient_labels=patient_labels,
+                manifest_codes=set(patient_labels),
+                cohort_name=cohort.name,
+                cohorts_dir=Path(cohorts_dir) if cohorts_dir is not None else None,
             )
-            print(f"[build_db] imported {len(versions)} split version(s) from {import_splits}")
-        else:
-            versions = generate_splits(
-                cohort, patient_labels, splits, rnaseq_covered=rnaseq_covered, require_coverage=require_coverage
-            )
-        for split_version in versions:
-            split_def = SplitDefinitions(version=split_version.version, description=split_version.description)
-            session.add(split_def)
+            # Resolve target-defining population stats once (binarize threshold / discretize edges).
+            contract_stats = _resolve_provenance(cohort, ctx)
+
+            n_slides = 0
+            n_probe_failed = 0
+            slide_desc = f"slides ({mode.value} probe)" if mode != ProbeMode.none else "slides"
+            for _, row in tqdm(slides.iterrows(), total=len(slides), desc=slide_desc):
+                code = str(row[sheets.PATIENT_ID])
+                patient = patient_cache[code]
+                image_rel = str(row[sheets.IMAGE_PATH])
+
+                reader = cohort.storage.default_reader
+                if has_reader_column and not _is_missing(row.get(sheets.READER)):
+                    reader = str(row[sheets.READER]).upper()
+
+                staining = cohort.storage.default_staining
+                if has_staining_column and not _is_missing(row.get(sheets.STAINING)):
+                    staining = str(row[sheets.STAINING])
+
+                mask_rel = masks_by_image.get(image_rel)
+                has_mask = mask_dir is not None and not _is_missing(mask_rel)
+                mask_full = (mask_dir / str(mask_rel)) if mask_dir is not None and has_mask else None
+
+                # Remote slides carry a URL in image_rel; local slides join onto the cohort image_dir.
+                slide_ref = image_rel if is_remote_reader(reader) else image_dir / image_rel
+
+                geometry: dict[str, Optional[float]] = {"height": None, "width": None, "mpp": None}
+                if mode != ProbeMode.none:
+                    probed = _probe_slide(slide_ref, reader, mode, mask_full, grid)
+                    if probed is None:
+                        print(f"[build_db] skipping slide (probe failed): {image_rel}")
+                        n_probe_failed += 1
+                        continue
+                    geometry = probed  # type: ignore[assignment]
+
+                image = Image(filename=image_rel, reader=reader, staining=staining, patient=patient, **geometry)
+                session.add(image)
+                session.flush()
+
+                for column in slides.columns:
+                    if column in sheets.RESERVED_SLIDE_COLUMNS:
+                        continue
+                    value = row[column]
+                    if _is_missing(value):
+                        continue
+                    session.add(ImageLabels(key=column, value=str(value), image=image))
+
+                if has_mask:
+                    session.add(Mask(filename=str(mask_rel), reader="IMAGEIO", image=image))
+                n_slides += 1
+
             session.flush()
-            for code, category in split_version.assignments:
-                session.add(
-                    Split(category=_CATEGORY[category], patient=patient_cache[code], split_definition=split_def)
+
+            rnaseq_covered = _resolve_coverage(cohort, ctx)
+            require_coverage = _resolve_require_coverage(splits.require_modalities, ctx)
+            if import_splits is not None:
+                # Predefined split: write the supplied assignment verbatim instead of drawing one with
+                # generate_splits.
+                valid_by_field = valid_patients_by_field(cohort, patient_labels, rnaseq_covered, require_coverage)
+                try:
+                    versions = import_splits_csv(import_splits)
+                    versions = validate_imported_splits(
+                        versions,
+                        splits,
+                        cohort_patients=set(patient_cache),
+                        valid_by_field=valid_by_field,
+                        allow_uncovered=import_allow_uncovered,
+                    )
+                except ValueError as exc:
+                    raise BuildDbError(f"imported splits {import_splits}: {exc}") from exc
+                print(f"[build_db] imported {len(versions)} split version(s) from {import_splits}")
+            else:
+                versions = generate_splits(
+                    cohort, patient_labels, splits, rnaseq_covered=rnaseq_covered, require_coverage=require_coverage
                 )
-            session.flush()
+            for split_version in versions:
+                split_def = SplitDefinitions(version=split_version.version, description=split_version.description)
+                session.add(split_def)
+                session.flush()
+                for code, category in split_version.assignments:
+                    session.add(
+                        Split(category=_CATEGORY[category], patient=patient_cache[code], split_definition=split_def)
+                    )
+                session.flush()
 
-        session.commit()
+            session.commit()
 
-    # Contract-resolution provenance (fold-invariant target stats). Empty for purely-categorical
-    # cohorts; train reads it to apply binarize/numeric target transforms consistently.
-    stats_path = db_path.parent / f"{cohort.name}_contract_stats.json"
-    stats_path.write_text(json.dumps(contract_stats, indent=2))
+        # Contract-resolution provenance (fold-invariant target stats). Empty for purely-categorical
+        # cohorts; train reads it to apply binarize/discretize cuts consistently.
+        layout.contract_stats_json(partial).write_text(json.dumps(contract_stats, indent=2))
 
-    # Always emit the resulting split as a portable CSV, the canonical export, and the exact format a
-    # sibling cohort imports. When imported, record where it came from so a reader never mistakes an
-    # imported split for a freshly drawn one.
-    export_splits_csv(versions, db_path.parent / f"{cohort.name}_splits.csv")
-    if import_splits is not None:
-        source_sha = hashlib.sha256(Path(import_splits).read_bytes()).hexdigest()[:16]
-        (db_path.parent / f"{cohort.name}_splits_source.json").write_text(
-            json.dumps({"imported_from": str(import_splits), "sha256_16": source_sha}, indent=2)
+        # Always emit the resulting split as a portable CSV, the canonical export, and the exact format a
+        # sibling cohort imports. When imported, record where it came from so a reader never mistakes an
+        # imported split for a freshly drawn one.
+        export_splits_csv(versions, layout.splits_csv(partial))
+        if import_splits is not None:
+            source_sha = hashlib.sha256(Path(import_splits).read_bytes()).hexdigest()[:16]
+            layout.splits_source_json(partial).write_text(
+                json.dumps({"imported_from": str(import_splits), "sha256_16": source_sha}, indent=2)
+            )
+
+        print(
+            f"[build_db] wrote {layout.manifest_db(out_dir)}: {len(patient_cache)} patients, {n_slides} slides, "
+            f"{len(versions)} split versions, {len(contract_stats)} resolved target stat(s)"
+            + (f", {n_probe_failed} slide(s) skipped (probe failed)" if n_probe_failed else "")
         )
 
-    print(
-        f"[build_db] wrote {db_path}: {len(patient_cache)} patients, {n_slides} slides, "
-        f"{len(versions)} split versions, {len(contract_stats)} resolved target stat(s)"
-    )
+        if analyze:
+            from dlux.data.analyze import analyze_db  # local import: pulls matplotlib/seaborn only when needed
 
-    if analyze:
-        from dlux.data.analyze import analyze_db  # local import: pulls matplotlib/seaborn only when needed
-
-        analyze_db(cohort, database_uri, db_path.parent / f"{cohort.name}_analysis", cohorts_dir=cohorts_dir)
+            analyze_db(
+                cohort,
+                f"sqlite:///{layout.manifest_db(partial)}",
+                layout.analysis_dir(partial),
+                cohorts_dir=cohorts_dir,
+            )

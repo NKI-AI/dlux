@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Survival metric math, pure numpy (no torch/ahcore), so both the train-time torchmetric wrapper
-(``dlux.tasks.survival``) and the torch-free aggregate reader (``dlux.eval.aggregate``) share one
-definition of Harrell's C. Parallel to ``dlux.eval.gene_metrics`` for the expression endpoint."""
+(``dlux.tasks.survival``) and the torch-free readers (``dlux.eval.survival``, ``dlux.eval.compare``) share
+one definition of Harrell's C. Parallel to ``dlux.eval.gene_metrics`` for the expression endpoint."""
 
 from __future__ import annotations
 

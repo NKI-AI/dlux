@@ -20,9 +20,10 @@ don't install ``openslide-python`` and don't want it) is expected, and not somet
 import os
 import sys
 import warnings
-from pathlib import Path
 
-__version__ = "0.1.0"
+from dlux.config.resolvers import _from_repo_root
+
+__version__ = "0.2.0"
 
 warnings.filterwarnings("ignore", message="OpenSlide is not available", category=UserWarning)
 
@@ -31,10 +32,10 @@ warnings.filterwarnings("ignore", message="OpenSlide is not available", category
 # `_target_` entries reference -- under $DLUX_PROJECT/src. Put that on the import path so those classes
 # resolve, wherever dlux runs (the sweep venv or a clone). Appended, never prepended: an installed copy
 # of the project (e.g. frozen into a sweep venv) is found first, so this only takes effect when the
-# project is not installed, and it can never shadow the frozen snapshot a sweep depends on. When run in
-# place, DLUX_PROJECT must be absolute (the cwd may not be the project root), same as the searchpath requires.
+# project is not installed, and it can never shadow the frozen snapshot a sweep depends on. A relative
+# DLUX_PROJECT is taken from the repository root, as the searchpath takes it.
 _dlux_project = os.environ.get("DLUX_PROJECT")
 if _dlux_project:
-    _dlux_project_src = str(Path(_dlux_project) / "src")
+    _dlux_project_src = str(_from_repo_root(_dlux_project) / "src")
     if os.path.isdir(_dlux_project_src) and _dlux_project_src not in sys.path:
         sys.path.append(_dlux_project_src)

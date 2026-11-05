@@ -11,13 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for persisting and replaying fit-derived stream state (dlux.modalities.state + BulkRNA)."""
+"""Tests for persisting and restoring fit-derived stream state (dlux.modalities.state + BulkRNA)."""
 
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 import pytest
+
 from dlux.modalities.bulk_rna import BulkRNA
 from dlux.modalities.state import (
     apply_stream_state,
@@ -55,7 +56,7 @@ class _Stateless:
 # -- what gets recorded -------------------------------------------------------
 def test_gene_identities_travel_with_the_statistics():
     # A panel NAME does not pin down the genes: hvg2000 is computed per cohort, so two cohorts' hvg2000
-    # are different gene sets. Replaying by name would score a model on the wrong genes.
+    # are different gene sets. Restoring by name would score a model on the wrong genes.
     state = _rna().fit_state()
     assert [str(g) for g in state["gene_ids"]] == _GENES
     assert state["panel_name"] == "hvg2000"
@@ -91,33 +92,33 @@ def test_absent_file_reads_as_nothing_recorded(tmp_path):
     assert read_stream_state(tmp_path) == {}
 
 
-# -- replay -------------------------------------------------------------------
+# -- restore ------------------------------------------------------------------
 def _matrix(tmp_path, columns):
     path = tmp_path / "matrix.parquet"
     pd.DataFrame(np.arange(2 * len(columns), dtype=float).reshape(2, len(columns)), columns=columns).to_parquet(path)
     return path
 
 
-def test_replay_restores_recorded_stats_and_ignores_matrix_order(tmp_path):
+def test_recorded_stats_are_restored_in_recorded_gene_order_not_matrix_order(tmp_path):
     # The external matrix carries the recorded genes in a DIFFERENT order plus extras; the recorded
     # order is what the model expects, so that is what comes back.
     path = _matrix(tmp_path, ["9999", "extra", "7503", "1234"])
-    ids, means, stds = BulkRNA.replay_stats(_rna().fit_state(), key="rna", matrix_path=path, gene_panel="hvg2000")
+    ids, means, stds = BulkRNA.recorded_stats(_rna().fit_state(), key="rna", matrix_path=path, gene_panel="hvg2000")
     assert ids == _GENES  # recorded order, NOT the matrix's
     assert list(means) == pytest.approx([1.0, 2.0, 3.0])
     assert list(stds) == pytest.approx([0.5, 1.5, 2.5])
 
 
-def test_replay_refuses_when_a_recorded_gene_is_absent(tmp_path):
+def test_restore_refuses_when_a_recorded_gene_is_absent(tmp_path):
     path = _matrix(tmp_path, ["7503", "1234"])  # 9999 missing
     with pytest.raises(ValueError, match="recorded genes are absent"):
-        BulkRNA.replay_stats(_rna().fit_state(), key="rna", matrix_path=path, gene_panel="hvg2000")
+        BulkRNA.recorded_stats(_rna().fit_state(), key="rna", matrix_path=path, gene_panel="hvg2000")
 
 
-def test_replay_refuses_a_different_panel_than_the_run_trained_on(tmp_path):
+def test_restore_refuses_a_different_panel_than_the_run_trained_on(tmp_path):
     path = _matrix(tmp_path, _GENES)
     with pytest.raises(ValueError, match="recorded gene_panel"):
-        BulkRNA.replay_stats(_rna().fit_state(), key="rna", matrix_path=path, gene_panel="hallmark")
+        BulkRNA.recorded_stats(_rna().fit_state(), key="rna", matrix_path=path, gene_panel="hallmark")
 
 
 # -- per-fold swapping --------------------------------------------------------
@@ -152,7 +153,7 @@ def test_swapping_refuses_a_changed_gene_set():
 
 
 def test_zero_std_stays_clamped_after_a_swap():
-    # A constant gene must not divide by zero -- the clamp lives in one place so construction and replay
+    # A constant gene must not divide by zero -- the clamp lives in one place so construction and restore
     # cannot drift apart.
     stream = _rna()
     apply_stream_state(
@@ -175,24 +176,9 @@ def test_recorded_state_a_stream_cannot_consume_is_an_error():
         apply_stream_state(_Task(_Stateless()), {"tiles": {"anything": np.array([1.0])}})
 
 
-def test_state_for_an_undeclared_stream_is_left_alone():
-    stream = _rna()
-    apply_stream_state(_Task(stream), {"some_other_stream": {"gene_ids": np.array([])}})
-    assert list(stream.gene_means.numpy()) == pytest.approx([1.0, 2.0, 3.0])
-
-
-# -- a fold that recorded nothing must not pass silently -----------------------
-# `apply_stream_state` with an empty payload is a NO-OP, so an unguarded loop would leave the previous
-# fold's statistics installed and score this fold's model against another fold's standardisation.
-def test_empty_payload_is_a_no_op_hence_must_be_caught_upstream():
-    stream = _rna()
-    apply_stream_state(_Task(stream), {})  # no exception, and...
-    assert list(stream.gene_means.numpy()) == pytest.approx([1.0, 2.0, 3.0])  # ...nothing changed
-
-    # so a fold whose state is missing keeps whatever the PREVIOUS fold installed:
-    apply_stream_state(_Task(stream), {"rna": {**_rna().fit_state(), "gene_means": np.array([9.0, 9.0, 9.0])}})
-    apply_stream_state(_Task(stream), {})  # the "missing state" fold
-    assert list(stream.gene_means.numpy()) == pytest.approx([9.0, 9.0, 9.0])  # still fold N-1's -- the hazard
+def test_state_for_an_undeclared_stream_is_refused():
+    with pytest.raises(ValueError, match=r"stream\(s\) \['some_other_stream'\] that the task does not declare"):
+        apply_stream_state(_Task(_rna()), {"some_other_stream": {"gene_ids": np.array([])}})
 
 
 def test_read_stream_state_of_a_fold_that_recorded_nothing(tmp_path):

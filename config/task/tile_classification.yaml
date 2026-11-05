@@ -1,0 +1,17 @@
+# @package task
+# TileClassificationTask predicts one binary patient endpoint from raw tiles, supervised per tile: every
+# tile carries its patient's label, and the model is a trainable tile classifier. The patient score (the
+# mean of a slide's tile probabilities) is formed at eval by dlux.eval.tile_pooling. Pair with
+# lit_module tile_cnn, and build the tile cache with bin/extract_tiles.py at the run's tiling.
+# `target` is REQUIRED per run.
+_target_: dlux.tasks.tile_classification.TileClassificationTask
+target:
+  field: ???
+# Class weighting, as in wsi_classification: `balanced` is inverse-frequency from THIS fold's fit split;
+# a {"0": w0, "1": w1} map sets the weights directly. Off by default.
+loss:
+  weight: none
+# The cached tile-image stream the model reads. The input name `tiles` is also the model's input_key.
+# `cache_root: null` reads the cache under the cohorts dir, where extract_tiles writes it by default.
+inputs:
+  tiles: {modality: tile_image, cache_root: null}

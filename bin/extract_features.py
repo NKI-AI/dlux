@@ -15,12 +15,13 @@
 
     extract_features study=tcga_subtyping cohort=tcga_brca_coad_christiana feature_extractor=phikon_tile   # real run (GPU)
     extract_features study=tcga_subtyping cohort=tcga_brca_coad_christiana dry_run=true                    # enumerate slides only (CPU)
+    extract_features study=tcga_subtyping cohort=tcga_brca_coad_christiana limit=3                         # the first 3 slides only
 
 Features are cached under ``cohorts/<cohort>/cache/``, keyed by model/grid/slide. The key is
 independent of split or study, so a cohort's features are extracted once and reused by every study it
-appears in. The ``study`` here only locates the cohort's DB (``studies/<study>/db/<cohort>.db``).
-Extraction runs over every slide in that manifest (``split_version=None``). Multi-GPU precompute is a
-single launch (``precomputer.devices``).
+appears in. The ``study`` here only locates the cohort's DB (``studies/<study>/db/<cohort>/manifest.db``).
+Extraction runs over every slide in that manifest (``split_version=None``). ``limit`` extracts the first N
+slides, and the run then ends INCOMPLETE. Multi-GPU precompute is a single launch (``precomputer.devices``).
 """
 
 from __future__ import annotations
@@ -31,17 +32,20 @@ from pathlib import Path
 
 import hydra
 import torch
-from dlux.config.cohort import Cohort, SplitCategory, Study
-from dlux.data import layout
-from dlux.data.analyze_features import analyze_features
-from dlux.data.compile import compile_data_description
-from dlux.modalities import TileFeatures
 from omegaconf import DictConfig, OmegaConf
 
 from ahcore.data.adapters.cached_tile_features import precompute_tile_features
 from ahcore.data.mm_dataset import MultiModalDataset
 from ahcore.transforms.tile import TileTransformFactory
 from ahcore.utils.io import print_config
+
+from dlux.config.cohort import Cohort, SplitCategory, Study
+from dlux.config.resolvers import register_resolvers
+from dlux.data import layout
+from dlux.data.analyze_features import analyze_features
+from dlux.data.compile import compile_data_description
+from dlux.data.slidescore import export_slidescore_key
+from dlux.modalities import TileFeatures
 
 
 def _build_dataset(cohort_dict: dict, tiling_dict: dict, database_uri: str) -> MultiModalDataset:
@@ -60,15 +64,30 @@ def _build_feature_model(feature_extractor_dict: dict) -> torch.nn.Module:
     return hydra.utils.instantiate(feature_extractor_dict)
 
 
+register_resolvers()
+
+
 @hydra.main(version_base=None, config_path="../config", config_name="extract_features")
 def main(cfg: DictConfig) -> None:
     print_config(
-        cfg, fields=("study", "cohort", "tiling", "feature_extractor", "paths", "precomputer", "dry_run", "analyze")
+        cfg,
+        fields=(
+            "study",
+            "cohort",
+            "tiling",
+            "feature_extractor",
+            "paths",
+            "precomputer",
+            "dry_run",
+            "limit",
+            "analyze",
+        ),
     )
 
     study = Study(**OmegaConf.to_container(cfg.study, resolve=True))  # type: ignore[arg-type]
     cohort_dict = OmegaConf.to_container(cfg.cohort, resolve=True)
     tiling_dict = OmegaConf.to_container(cfg.tiling, resolve=True)
+    assert isinstance(cohort_dict, dict) and isinstance(tiling_dict, dict)
     cohort_name = str(cfg.cohort.name)
     if cohort_name not in study.cohorts:
         sys.exit(
@@ -77,12 +96,17 @@ def main(cfg: DictConfig) -> None:
         )
     database_uri = layout.db_uri(cfg.paths.studies_dir, study.name, cohort_name)
 
+    # Export the SlideScore token before any slide is opened, in the parent process so the spawned
+    # extraction workers inherit it. No-op for local cohorts.
+    export_slidescore_key(Cohort.model_validate(cohort_dict), cfg)
+
     if cfg.dry_run:
-        dataset = _build_dataset(cohort_dict, tiling_dict, database_uri)  # type: ignore[arg-type]
+        dataset = _build_dataset(cohort_dict, tiling_dict, database_uri)
         print(f"[extract_features] dry run: {len(dataset)} slides enumerated for '{cohort_name}' (split-agnostic)")
         return
 
     feature_extractor_dict = OmegaConf.to_container(cfg.feature_extractor, resolve=True)
+    assert isinstance(feature_extractor_dict, dict)
     # One CPU instantiation reads the model identity; workers build their own on-GPU copies. Writer and
     # reader derive the cache namespace from the same function, so they cannot mismatch.
     model_name, model_hash, feature_dim = TileFeatures.identify(cfg.feature_extractor)
@@ -93,8 +117,13 @@ def main(cfg: DictConfig) -> None:
     # precompute_tile_features runs, instead of spawning zero workers and silently doing nothing.
     world_size = max(world_size, 1)
 
+    slide_ids = None
+    if cfg.limit is not None:
+        slide_ids = list(_build_dataset(cohort_dict, tiling_dict, database_uri).slide_views())[: int(cfg.limit)]
+
     cache_path = precompute_tile_features(
         dataset_factory=partial(_build_dataset, cohort_dict, tiling_dict, database_uri),
+        slide_ids=slide_ids,
         feature_model_factory=partial(_build_feature_model, feature_extractor_dict),
         cache_root=Path(cfg.paths.cohorts_dir),
         model_name=model_name,
@@ -112,13 +141,12 @@ def main(cfg: DictConfig) -> None:
     if cfg.analyze:
         summary = analyze_features(cache_path)
         if summary is None:
-            print(
-                "[extract_features] nothing cached — no slide produced tiles. Likely the cohort's masks "
-                "(mask_dir) are empty/missing or the tiling mask_threshold rejected everything; check the "
-                f"extraction report for per-slide status. ({cache_path})"
+            raise RuntimeError(
+                "Nothing cached: no slide produced tiles. Likely the cohort's masks (mask_dir) are empty or "
+                "missing, or the tiling mask_threshold rejected everything. The extraction report has each "
+                f"slide's status. ({cache_path})"
             )
-        else:
-            print(f"[extract_features] wrote {summary} + tiles.png")
+        print(f"[extract_features] wrote {summary} + tiles.png")
 
 
 if __name__ == "__main__":

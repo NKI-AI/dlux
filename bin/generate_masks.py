@@ -17,8 +17,9 @@
 
 Reads the cohort's ``sheets/slides.csv`` (masks are produced before build_db), runs the HuggingFace
 tissue segmenter (``NKI-AI/tissue-bg-all-stains``, auto-downloaded + cached) over each slide, and writes
-``<output_dir>/<image_path>.mask.tiff`` — mirroring the slide's relative path, which is unique per
-cohort, so two slides of the same basename cannot map to one file.
+``<output_dir>/<mask name>.mask.tiff``. A local slide's mask mirrors its relative path, which is unique
+per cohort, so two slides of the same basename cannot map to one file; a remote slide's URL is collapsed
+to a flat ``slidescore_<id>`` key.
 
 Each mask is recorded in ``sheets/masks.csv`` (``image_path,mask_path``), which this binary owns and
 ``build_db`` joins on. Point the cohort's ``mask_dir`` at ``output_dir`` to pick them up. A cohort that
@@ -29,25 +30,30 @@ mask exists is skipped, so masks written under any convention are left alone. GP
 from __future__ import annotations
 
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import hydra
 import pandas as pd
 import torch
-from dlux.config.cohort import Cohort
-from dlux.data import sheets
-from dlux.data.masks import load_pack, segment_slide, write_overlay
-from dlux.data.sheets import IMAGE_PATH, read_slides
 from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 
 from ahcore.utils.io import get_logger, print_config
+from ahcore.utils.remote import is_remote_reader, slide_cache_key
+
+from dlux.config.cohort import Cohort
+from dlux.config.resolvers import register_resolvers
+from dlux.data import sheets
+from dlux.data.masks import load_pack, segment_slide, write_overlay
+from dlux.data.sheets import IMAGE_PATH, read_slides
+from dlux.data.slidescore import export_slidescore_key
 
 logger = get_logger(__name__)
 
 
-def _resolve_pack(cfg: DictConfig, cache_dir: Path) -> Path:
-    """Explicit ``pack_path`` if set, else download the .pack from HuggingFace (cached)."""
+def _resolve_pack(cfg: DictConfig) -> Path:
+    """Explicit ``pack_path`` if set, else download the .pack from HuggingFace (into HuggingFace's own cache)."""
     if cfg.mask_generator.get("pack_path"):
         return Path(cfg.mask_generator.pack_path)
     from huggingface_hub import hf_hub_download
@@ -57,9 +63,11 @@ def _resolve_pack(cfg: DictConfig, cache_dir: Path) -> Path:
         hf_hub_download(
             repo_id=str(cfg.mask_generator.hf_repo_id),
             filename=str(cfg.mask_generator.hf_filename),
-            cache_dir=str(cache_dir) if cache_dir else None,
         )
     )
+
+
+register_resolvers()
 
 
 @hydra.main(version_base=None, config_path="../config", config_name="generate_masks")
@@ -67,6 +75,8 @@ def main(cfg: DictConfig) -> None:
     print_config(cfg, fields=("cohort", "mask_generator", "paths", "output_dir", "overwrite"))
 
     cohort = Cohort(**OmegaConf.to_container(cfg.cohort, resolve=True))  # type: ignore[arg-type]
+    # Segmenting a remote cohort streams its tiles over HTTP, so the token must be exported first.
+    export_slidescore_key(cohort, cfg)
     image_dir = Path(cohort.storage.image_dir)
     slides_csv = Path(cfg.paths.cohorts_dir) / cohort.name / "sheets" / "slides.csv"
     if not slides_csv.exists():
@@ -79,11 +89,10 @@ def main(cfg: DictConfig) -> None:
 
     device_str = cfg.mask_generator.get("device")
     if device_str in (None, "auto"):
-        device = torch.accelerator.current_accelerator() if torch.accelerator.is_available() else torch.device("cpu")
+        device = torch.accelerator.current_accelerator() or torch.device("cpu")
     else:
         device = torch.device(device_str)
-    cache_dir = Path(cfg.paths.hf_cache_dir) if OmegaConf.select(cfg, "paths.hf_cache_dir") else None
-    model, seg_config = load_pack(_resolve_pack(cfg, cache_dir), device)
+    model, seg_config = load_pack(_resolve_pack(cfg), device)
     logger.info(
         "segmenter loaded (mpp=%s, tile=%s) on %s; %d slides -> %s",
         seg_config.mpp,
@@ -94,8 +103,13 @@ def main(cfg: DictConfig) -> None:
     )
 
     reader = cohort.storage.default_reader
-    thumbnails = bool(cfg.mask_generator.get("thumbnail", True))
+    remote = is_remote_reader(reader)
+    thumbnails = bool(cfg.mask_generator.thumbnail)
     quiet_reader = bool(cfg.mask_generator.get("quiet_reader", True))
+
+    def slide_source(rel: str) -> str:
+        """The slide address dlup opens: a remote rel is already a full URL; a local rel joins image_dir."""
+        return rel if remote else str(image_dir / rel)
 
     # masks.csv records where each slide's mask actually is, so a mask written under any convention
     # (a cohort's own, or this generator's) is recognised and not regenerated.
@@ -103,9 +117,10 @@ def main(cfg: DictConfig) -> None:
     recorded = sheets.read_masks(masks_csv)
 
     def mask_path_for(rel: str) -> Path:
-        """Where a slide's mask is, or will be. New masks mirror the slide's relative path, which is
-        unique per cohort, so no two slides can name the same file."""
-        return output_dir / recorded[rel] if rel in recorded else output_dir / f"{rel}.mask.tiff"
+        """Where a slide's mask is, or will be. A local rel names its own relative path, unique per
+        cohort; a remote rel is a URL, collapsed to the flat ``slidescore_<id>`` key the feature store
+        uses, because a URL cannot be a filename."""
+        return output_dir / recorded[rel] if rel in recorded else output_dir / f"{slide_cache_key(rel)}.mask.tiff"
 
     def thumb_path_for(mask_out: Path) -> Path:
         """The QC thumbnail beside a mask, named off the same base — ``<base>.mask.tiff`` pairs with
@@ -131,7 +146,10 @@ def main(cfg: DictConfig) -> None:
     n_done = n_thumb = n_skipped = 0
     failures: list[str] = []
     unreadable: dict[str, int] = {}  # slide -> #corrupt tiles marked background (this run)
-    for rel in tqdm(image_paths, desc="masks", unit="slide"):
+
+    def _process(rel: str) -> tuple[str, str, object]:
+        """One slide: generate its mask, backfill a missing thumbnail, or skip. Returns a tagged result
+        and mutates no shared state, so the pool needs no locks — the caller aggregates."""
         mask_out = mask_path_for(rel)
         thumb_out = thumb_path_for(mask_out)
         mask_out.parent.mkdir(parents=True, exist_ok=True)
@@ -139,27 +157,43 @@ def main(cfg: DictConfig) -> None:
             if mask_out.exists() and not overwrite:
                 # Mask already present: backfill a missing QC thumbnail (no inference), else skip.
                 if thumbnails and not thumb_out.exists():
-                    write_overlay(image_dir / rel, mask_out, thumb_out, reader=reader, quiet=quiet_reader)
-                    n_thumb += 1
-                else:
-                    n_skipped += 1
-                continue
+                    write_overlay(slide_source(rel), mask_out, thumb_out, reader=reader, quiet=quiet_reader)
+                    return "thumb", rel, None
+                return "skip", rel, None
             n_failed = segment_slide(
                 model,
                 seg_config,
-                image_dir / rel,
+                slide_source(rel),
                 mask_out,
                 device=device,
                 reader=reader,
                 thumbnail_file=thumb_out if thumbnails else None,
                 quiet_reader=quiet_reader,
             )
-            if n_failed:
-                unreadable[rel] = n_failed
-            n_done += 1
+            return "done", rel, n_failed
         except Exception as exc:  # noqa: BLE001 — per-slide failures are logged, not fatal
-            failures.append(rel)
-            logger.error("FAILED %s: %s", rel, exc)
+            return "fail", rel, exc
+
+    # A remote slide's cost is its HTTP fetch (~1s/tile), and one slide's backend cannot parallelize its
+    # own reads (a single asyncio loop) — but each slide has its own backend, so running slides
+    # concurrently overlaps the fetches. Local slides read from disk fast and default to one worker.
+    slide_workers = cfg.mask_generator.get("slide_workers")
+    slide_workers = int(slide_workers) if slide_workers else (12 if remote else 1)
+    with ThreadPoolExecutor(max_workers=slide_workers) as pool:
+        futures = [pool.submit(_process, rel) for rel in image_paths]
+        for fut in tqdm(as_completed(futures), total=len(futures), desc="masks", unit="slide"):
+            kind, rel, payload = fut.result()
+            if kind == "thumb":
+                n_thumb += 1
+            elif kind == "skip":
+                n_skipped += 1
+            elif kind == "fail":
+                failures.append(rel)
+                logger.error("FAILED %s: %s", rel, payload)
+            else:
+                if payload:
+                    unreadable[rel] = payload
+                n_done += 1
 
     logger.info(
         "done: generated=%d thumbnails_backfilled=%d skipped=%d failed=%d -> %s",

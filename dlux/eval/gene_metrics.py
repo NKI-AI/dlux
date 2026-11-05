@@ -42,7 +42,7 @@ def per_gene_pearson(preds: np.ndarray, labels: np.ndarray) -> np.ndarray:
 
 
 def _rank_columns(x: np.ndarray) -> np.ndarray:
-    """Ordinal ranks down each column (ties broken arbitrarily, matches ``aggregate._spearman``)."""
+    """Ordinal ranks down each column (ties broken arbitrarily, matches ``regression._spearman``)."""
     return np.argsort(np.argsort(x, axis=0), axis=0).astype(np.float64)
 
 

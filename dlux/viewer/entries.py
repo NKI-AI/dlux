@@ -22,6 +22,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from ahcore.utils.remote import is_remote_reader
+
 from dlux.config.cohort import Cohort
 from dlux.data import sheets
 from dlux.data.sheets import IMAGE_PATH, read_slides
@@ -35,7 +37,6 @@ class SlideEntry:
     slide_id: str
     image_path: Path
     mask_path: Path | None
-    reader: str
     patient_id: str
 
     @property
@@ -57,8 +58,14 @@ def resolve_entries(cohort: Cohort, cohorts_dir: Path, *, only: list[str] | None
 
     Raises:
         FileNotFoundError: the cohort has no slides sheet.
-        ValueError: ``only`` names a slide the cohort does not have.
+        ValueError: the cohort's slides are remote (the viewer reads local files only), or ``only`` names
+            a slide the cohort does not have.
     """
+    if is_remote_reader(cohort.storage.default_reader):
+        raise ValueError(
+            f"cohort '{cohort.name}' reads its slides through {cohort.storage.default_reader}. The viewer "
+            "serves local slide files only."
+        )
     slides_csv = cohorts_dir / cohort.name / "sheets" / "slides.csv"
     if not slides_csv.exists():
         raise FileNotFoundError(f"slides sheet not found: {slides_csv} (build the cohort sheets first)")
@@ -78,7 +85,6 @@ def resolve_entries(cohort: Cohort, cohorts_dir: Path, *, only: list[str] | None
             slide_id=slide_id,
             image_path=image_dir / slide_id,
             mask_path=(mask_dir / mask_rel) if (mask_dir and mask_rel) else None,
-            reader=cohort.storage.default_reader,
             patient_id=str(getattr(row, "patient_id", "")),
         )
 

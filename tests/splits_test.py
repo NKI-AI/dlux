@@ -11,11 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for dlux.data.splits: bin_continuous, facet-aware strata, nested_cv, simple, all_*."""
+"""Tests for dlux.data.splits: bin_continuous, facet-aware strata, nested_cv, all_*."""
 
 from __future__ import annotations
 
 import pytest
+
 from dlux.config.cohort import Cohort, Splits, SplitStrategy, Storage, StratifyMethod
 from dlux.data.splits import (
     FIT,
@@ -24,11 +25,15 @@ from dlux.data.splits import (
     SplitVersion,
     _valid_patients_and_strata,
     bin_continuous,
+    draw_split,
     export_splits_csv,
+    field_codes_and_strata,
     format_cv_split,
     generate_splits,
     import_splits_csv,
     parse_cv_split,
+    split_hash,
+    unusable_values,
     valid_patients_by_field,
     validate_imported_splits,
 )
@@ -112,7 +117,27 @@ def test_strata_override_column():
     assert set(strata) == {0, 1}  # stratified on site (A/B), not the score
 
 
-# -- nested_cv / simple / all_* (unchanged behaviors, new contract) ----------
+# -- unusable values: every patient left out for a value is reported, an empty cell is not -----------
+def test_unusable_values_are_the_values_that_leave_a_patient_out():
+    contract = {
+        **_BINARY,
+        "score": {"source": {"column": "score"}, "objective": "regression"},
+        "os": {"source": {"column": "event", "time_column": "months"}, "objective": "survival"},
+    }
+    cohort = _cohort(contract)
+    labels = {
+        "a": {"cancer_type": "BRCA", "score": "1.5", "event": "1", "months": "12"},
+        "b": {"cancer_type": "LUAD", "score": "NA", "event": "yes", "months": "0"},
+        "c": {"cancer_type": "", "score": "NA", "event": "", "months": "-3"},
+    }
+    for name, field in cohort.contract.items():
+        assert field_codes_and_strata(field, name, labels, None)[0] == ["a"]
+    assert unusable_values(cohort.contract["cancer_type"], labels) == {"cancer_type": {"LUAD": 1}}
+    assert unusable_values(cohort.contract["score"], labels) == {"score": {"NA": 2}}
+    assert unusable_values(cohort.contract["os"], labels) == {"event": {"yes": 1}, "months": {"0": 1, "-3": 1}}
+
+
+# -- nested_cv / all_* ------------------------------------------------------
 def test_nested_cv_naming_and_count():
     versions = generate_splits(
         _cohort(_BINARY), _binary_labels(10), _splits(SplitStrategy.nested_cv, n_outer=2, n_inner=3)
@@ -147,14 +172,6 @@ def test_nested_cv_partition_disjoint_and_complete():
         fit, val, test = by_cat["fit"], by_cat["validate"], by_cat["test"]
         assert fit.isdisjoint(val) and fit.isdisjoint(test) and val.isdisjoint(test)
         assert fit | val | test == all_codes
-
-
-def test_simple_three_way():
-    versions = generate_splits(
-        _cohort(_BINARY), _binary_labels(10), _splits(SplitStrategy.simple, ratios=[0.6, 0.2, 0.2])
-    )
-    assert len(versions) == 1
-    assert {cat for _, cat in versions[0].assignments} == {"fit", "validate", "test"}
 
 
 def test_all_test_is_per_target():
@@ -352,3 +369,36 @@ def test_discretize_strata_are_k_class():
     codes, strata = _valid_patients_and_strata(cohort.contract["cnh"], labels)
     assert len(codes) == 9
     assert strata == [0, 0, 0, 1, 1, 1, 2, 2, 2]  # equal-frequency thirds, ties go up
+
+
+# -- the in-memory resplit draw ----------------------------------------------
+_DRAW_CODES = [f"p{i:02d}" for i in range(40)]
+_DRAW_STRATA = [0] * 30 + [1] * 10
+
+
+def test_draw_split_is_a_disjoint_partition_of_the_patients():
+    drawn = draw_split(_DRAW_CODES, _DRAW_STRATA, ratios=(0.6, 0.2, 0.2), seed=3)
+    stages = [set(drawn[s]) for s in ("fit", "validate", "test")]
+    assert sum(len(s) for s in stages) == 40 and set().union(*stages) == set(_DRAW_CODES)
+    assert [len(s) for s in stages] == [24, 8, 8]
+
+
+def test_draw_split_keeps_the_strata_ratio_in_every_stage():
+    drawn = draw_split(_DRAW_CODES, _DRAW_STRATA, ratios=(0.6, 0.2, 0.2), seed=3)
+    stratum = dict(zip(_DRAW_CODES, _DRAW_STRATA))
+    assert [sum(stratum[c] for c in drawn[s]) for s in ("fit", "validate", "test")] == [6, 2, 2]
+
+
+def test_draw_split_is_deterministic_in_the_seed_and_differs_across_seeds():
+    first = draw_split(_DRAW_CODES, _DRAW_STRATA, ratios=(0.8, 0.2), seed=7)
+    assert first == draw_split(_DRAW_CODES, _DRAW_STRATA, ratios=(0.8, 0.2), seed=7)
+    assert set(first) == {"fit", "validate"}
+    assert first != draw_split(_DRAW_CODES, _DRAW_STRATA, ratios=(0.8, 0.2), seed=8)
+
+
+def test_split_hash_ignores_order_and_changes_when_one_patient_moves():
+    drawn = {"fit": ["a", "b", "c"], "validate": ["d"], "test": ["e"]}
+    shuffled = {"test": ["e"], "validate": ["d"], "fit": ["c", "a", "b"]}
+    moved = {"fit": ["a", "b"], "validate": ["c", "d"], "test": ["e"]}
+    assert split_hash(drawn) == split_hash(shuffled)
+    assert split_hash(drawn) != split_hash(moved)
