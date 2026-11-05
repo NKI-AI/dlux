@@ -38,20 +38,27 @@ def regression_vector_loss(preds: torch.Tensor, target: torch.Tensor) -> torch.T
 
 
 class GenePearsonMean(Metric):
-    """Mean per-gene Pearson over the full split, accumulated across batches (streamable model-selection
-    signal, the aggregate-time headline made available per epoch).
+    """Mean per-gene Pearson over the full split, accumulated across batches (the aggregate-time headline,
+    available per epoch).
 
     Running per-gene sums are accumulated from each (B, G) batch (NaN target elements masked per
     element, so a patient absent from the RNA matrix contributes nothing), so ``compute()`` is the
     NaN-safe mean over genes of each gene's Pearson across all patients seen this epoch. Genes seen on
-    < 2 patients or constant (in preds or labels) are dropped. Higher is better, monitor
-    ``validate/gene_pearson_mean`` to select checkpoints directly on the metric we care about. Pearson
-    is invariant to the per-gene affine z-score, so this matches the log1p-space per-gene Pearson that
-    aggregate reports."""
+    < 2 patients or constant (in preds or labels) are dropped. Higher is better. Pearson is invariant
+    to the per-gene affine z-score, so this matches the log1p-space per-gene Pearson that aggregate
+    reports."""
 
     is_differentiable = False
     higher_is_better = True
     full_state_update = False
+
+    # Registered by add_state in __init__, which sets them on the instance rather than here.
+    sum_x: torch.Tensor
+    sum_y: torch.Tensor
+    sum_xy: torch.Tensor
+    sum_x2: torch.Tensor
+    sum_y2: torch.Tensor
+    count: torch.Tensor
 
     def __init__(self, num_genes: int, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -87,6 +94,5 @@ class GenePearsonMean(Metric):
 
 
 def build_gene_metrics(split: str, num_genes: int) -> MetricCollection:
-    """Streaming mean per-gene Pearson for ``split`` (train/validate/test). MSE is already logged via
-    the loss; the per-gene Pearson is the metric to select on, so it is the one streamed here."""
+    """Streaming mean per-gene Pearson for ``split`` (train/validate/test). MSE is logged via the loss."""
     return MetricCollection({f"{split}/gene_pearson_mean": GenePearsonMean(num_genes)})

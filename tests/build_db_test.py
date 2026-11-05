@@ -21,27 +21,32 @@ are unit-tested separately in splits_test.py."""
 from __future__ import annotations
 
 import csv
+from pathlib import Path
 
 import pytest
-from dlux.config.cohort import Cohort, Splits, SplitStrategy, Storage
-from dlux.data.build_db import build_db
 
 from ahcore.manifest import Split, open_db
 
-_BINARY = {"cancer_type": {"type": "binary", "map": {"BRCA": 0, "COAD": 1}}}
+from dlux.config.cohort import Cohort, ContractField, Splits, SplitStrategy, Storage
+from dlux.data import layout
+from dlux.data.build_db import build_db
+from dlux.data.errors import BuildDbError
+
+_BINARY = {"cancer_type": ContractField.model_validate({"type": "binary", "map": {"BRCA": 0, "COAD": 1}})}
 
 
 def _codes(n_per_class: int) -> list[str]:
     return [f"brca{i}" for i in range(n_per_class)] + [f"coad{i}" for i in range(n_per_class)]
 
 
-def _write_sheets(dirpath, codes: list[str]) -> tuple:
+def _write_sheets(dirpath, codes: list[str], unlabelled: frozenset[str] = frozenset()) -> tuple:
     patients_csv, slides_csv = dirpath / "patients.csv", dirpath / "slides.csv"
     with open(patients_csv, "w", newline="") as fh:
         writer = csv.writer(fh)
         writer.writerow(["patient_id", "cancer_type"])
         for code in codes:
-            writer.writerow([code, "BRCA" if code.startswith("brca") else "COAD"])
+            label = "" if code in unlabelled else "BRCA" if code.startswith("brca") else "COAD"
+            writer.writerow([code, label])
     with open(slides_csv, "w", newline="") as fh:
         writer = csv.writer(fh)
         writer.writerow(["patient_id", "image_path"])
@@ -50,22 +55,25 @@ def _write_sheets(dirpath, codes: list[str]) -> tuple:
     return patients_csv, slides_csv
 
 
-def _build(tmp_path, name: str, codes: list[str], **build_kw) -> str:
+def _build(tmp_path, name: str, codes: list[str], unlabelled: frozenset[str] = frozenset(), **build_kw) -> str:
     cohort_dir = tmp_path / name
-    cohort_dir.mkdir()
-    patients_csv, slides_csv = _write_sheets(cohort_dir, codes)
-    uri = f"sqlite:///{tmp_path}/{name}.db"
+    cohort_dir.mkdir(exist_ok=True)
+    patients_csv, slides_csv = _write_sheets(cohort_dir, codes, unlabelled)
     build_db(
         Cohort(name=name, storage=Storage(image_dir=str(cohort_dir)), contract=_BINARY),
         Splits(strategy=SplitStrategy.nested_cv, n_outer=2, n_inner=2),
-        uri,
+        _db(tmp_path, name),
         patients_csv=patients_csv,
         slides_csv=slides_csv,
         probe="none",
         analyze=False,
         **build_kw,
     )
-    return uri
+    return f"sqlite:///{layout.manifest_db(_db(tmp_path, name))}"
+
+
+def _db(tmp_path, name: str) -> Path:
+    return tmp_path / "db" / name
 
 
 def _db_splits(uri: str) -> dict[str, set[tuple[str, str]]]:
@@ -74,14 +82,14 @@ def _db_splits(uri: str) -> dict[str, set[tuple[str, str]]]:
     with open_db(uri, ensure_exists=False) as session:
         for row in session.query(Split).all():
             category = getattr(row.category, "value", row.category)
-            out.setdefault(row.split_definition.version, set()).add((row.patient.patient_code, category))
+            out.setdefault(row.split_definition.version, set()).add((str(row.patient.patient_code), str(category)))
     return out
 
 
 def test_import_reproduces_generated_split(tmp_path):
     codes = _codes(3)
     uri_gen = _build(tmp_path, "gen", codes)
-    emitted = tmp_path / "gen_splits.csv"  # build_db always exports beside the DB
+    emitted = layout.splits_csv(_db(tmp_path, "gen"))  # build_db always exports the split with the DB
     assert emitted.is_file()
     generated = _db_splits(uri_gen)
     assert len(generated) == 4  # 2 outer x 2 inner
@@ -93,12 +101,76 @@ def test_import_reproduces_generated_split(tmp_path):
 def test_import_strict_errors_on_uncovered_then_allows(tmp_path):
     codes = _codes(3)
     _build(tmp_path, "gen2", codes)
-    emitted = tmp_path / "gen2_splits.csv"
+    emitted = layout.splits_csv(_db(tmp_path, "gen2"))
 
     bigger = codes + ["brca9"]  # an extra labelled patient the import file does not cover
-    with pytest.raises(ValueError, match="absent from the imported splits"):
+    with pytest.raises(BuildDbError, match="absent from the imported splits"):
         _build(tmp_path, "sub_strict", bigger, import_splits=emitted)
 
     uri_ok = _build(tmp_path, "sub_ok", bigger, import_splits=emitted, import_allow_uncovered=True)
     placed = {code for members in _db_splits(uri_ok).values() for code, _ in members}
     assert "brca9" not in placed and placed == set(codes)
+
+
+def test_import_strict_errors_on_a_patient_without_a_valid_label_then_drops_it(tmp_path):
+    codes = _codes(8)
+    _build(tmp_path, "gen3", codes)
+    emitted = layout.splits_csv(_db(tmp_path, "gen3"))
+
+    with pytest.raises(BuildDbError, match="no valid 'cancer_type' label"):
+        _build(tmp_path, "nolabel_strict", codes, unlabelled=frozenset({"brca0"}), import_splits=emitted)
+
+    uri_ok = _build(
+        tmp_path,
+        "nolabel_ok",
+        codes,
+        unlabelled=frozenset({"brca0"}),
+        import_splits=emitted,
+        import_allow_uncovered=True,
+    )
+    placed = {code for members in _db_splits(uri_ok).values() for code, _ in members}
+    assert placed == set(codes) - {"brca0"}
+
+
+def test_a_failed_rebuild_leaves_the_previous_build(tmp_path):
+    codes = _codes(3)
+    uri = _build(tmp_path, "keep", codes)
+    before = _db_splits(uri)
+    bad = tmp_path / "bad_splits.csv"
+    bad.write_text("not,a,split,file\n")
+
+    with pytest.raises(BuildDbError):
+        _build(tmp_path, "keep", codes, import_splits=bad, overwrite=True)
+
+    assert _db_splits(uri) == before
+    assert layout.splits_csv(_db(tmp_path, "keep")).is_file()
+    assert not _db(tmp_path, "keep").with_name("keep.partial").exists()
+
+
+def test_a_failure_after_the_db_is_written_leaves_the_previous_build(tmp_path, monkeypatch):
+    uri = _build(tmp_path, "late", _codes(4))
+    before = _db_splits(uri)
+
+    def fail(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("dlux.data.build_db.export_splits_csv", fail)
+    with pytest.raises(OSError, match="disk full"):
+        _build(tmp_path, "late", _codes(3), overwrite=True)
+
+    assert _db_splits(uri) == before
+    assert layout.splits_csv(_db(tmp_path, "late")).is_file()
+    assert layout.contract_stats_json(_db(tmp_path, "late")).is_file()
+    assert not _db(tmp_path, "late").with_name("late.partial").exists()
+
+
+def test_a_drawn_rebuild_drops_the_import_record_of_an_imported_build(tmp_path):
+    codes = _codes(3)
+    _build(tmp_path, "src", codes)
+    _build(tmp_path, "rebuilt", codes, import_splits=layout.splits_csv(_db(tmp_path, "src")))
+    assert layout.splits_source_json(_db(tmp_path, "rebuilt")).is_file()
+
+    _build(tmp_path, "rebuilt", codes, overwrite=True)
+
+    assert not layout.splits_source_json(_db(tmp_path, "rebuilt")).exists()
+    assert layout.splits_csv(_db(tmp_path, "rebuilt")).is_file()

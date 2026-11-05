@@ -3,8 +3,8 @@
 # random initialization over the 25 epochs, so the arm stays near chance. Only the learning rate differs.
 defaults:
   - override /task: wsi_classification
+  - override /feature_extractor: phikon_tile
 experiment_name: lr_starved
-task_name: wsi_classification
 datamodule:
   batch_size: 4
 trainer:

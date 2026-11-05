@@ -18,8 +18,8 @@ copy the artifacts we care about into a stable, canonical dir keyed by
 ``(experiment_name, split_version)`` under ``studies/<study>/runs/``. Downstream aggregation reads
 only the canonical dirs.
 
-Three safeguards against the timestamp-clash bug (two runs resolving to the same
-hydra dir and silently clobbering each other):
+Three safeguards against two runs resolving to the same hydra dir and silently
+clobbering each other:
 
 1. **Namespacing**, the hydra ``run.dir`` includes ``experiment_name`` + ``split_version``
    (configured in ``config/hydra``), so different folds cannot collide by construction.
@@ -42,6 +42,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Mapping
 
+from dlux.data import layout
+
 logger = logging.getLogger(__name__)
 
 _MARKER_NAME = "run_marker.json"
@@ -59,7 +61,7 @@ def persistent_run_dir(
     for label, value in parts.items():
         if not value:
             raise ValueError(f"{label} is required to compute the persistent run directory.")
-    return Path(studies_dir) / study / "runs" / experiment_name / cohort / split_version
+    return layout.run_dir(studies_dir, study, experiment_name, cohort, split_version)
 
 
 def run_already_persisted(run_dir: str | Path) -> bool:
@@ -125,23 +127,22 @@ def persist_run_artifacts(
 ) -> None:
     """Copy ``artifacts`` into the canonical ``run_dir`` and write ``metadata.json`` last.
 
-    ``artifacts`` maps destination filename -> source path (in the disposable hydra dir).
-    Missing sources are warned about, not fatal (the run dir will be flagged incomplete via
-    the log). ``metadata.json`` is written last so its presence means "run fully persisted".
+    ``artifacts`` maps destination filename -> source path (in the disposable hydra dir). A missing source
+    raises before anything is written. ``metadata.json`` is written last, so its presence means "run fully
+    persisted".
     """
+    missing = {dest: str(src) for dest, src in artifacts.items() if not Path(src).exists()}
+    if missing:
+        raise FileNotFoundError(f"Run artifacts missing, nothing persisted: {missing}")
     run_dir = Path(run_dir)
     if force and run_dir.exists():
         logger.info("+force=true: clearing existing %s before persisting fresh artifacts.", run_dir)
-        shutil.rmtree(run_dir, ignore_errors=True)
+        shutil.rmtree(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
 
     for dest_name, src in artifacts.items():
-        src_path = Path(src)
-        if src_path.exists():
-            shutil.copy2(src_path, run_dir / dest_name)
-            logger.info("Persisted %s -> %s", dest_name, run_dir / dest_name)
-        else:
-            logger.warning("Missing artifact %s at %s; persistent run dir will be incomplete.", dest_name, src_path)
+        shutil.copy2(src, run_dir / dest_name)
+        logger.info("Persisted %s -> %s", dest_name, run_dir / dest_name)
 
     # Sentinel, written last.
     (run_dir / _SENTINEL_NAME).write_text(json.dumps(dict(metadata), indent=2))

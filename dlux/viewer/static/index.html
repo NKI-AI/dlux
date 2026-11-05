@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
@@ -446,7 +446,7 @@
       let currentImageIndex = 0;
 
       const slideParam = new URLSearchParams(window.location.search).get(
-        "slide"
+        "slide",
       );
       // Which subset prev/next walks, inherited from the browser list's filter via the URL and carried
       // across navigation, so stepping stays inside the set that was filtered to.
@@ -497,7 +497,7 @@
             const [z, x, y] = tileCoord;
             if (x < 0 || y < 0) return undefined;
             return withSlide(
-              `/tiles/${image.index}/${z}/${x}/${y}.${TILE_FORMAT}`
+              `/tiles/${image.index}/${z}/${x}/${y}.${TILE_FORMAT}`,
             );
           },
         });
@@ -625,7 +625,7 @@
               fill: new ol.style.Fill({
                 color: `rgba(${r},${g},${b},${bucket / 32})`,
               }),
-            })
+            }),
           );
         }
         return styleCache.get(bucket);
@@ -735,16 +735,14 @@
           slideInfo.patient_id ? `patient ${slideInfo.patient_id}` : "";
         document.getElementById("i-format").textContent =
           slideInfo.format || "-";
-        document.getElementById(
-          "i-dims"
-        ).textContent = `${image.dimensions[0]} × ${image.dimensions[1]}`;
+        document.getElementById("i-dims").textContent =
+          `${image.dimensions[0]} × ${image.dimensions[1]}`;
         document.getElementById("i-mpp").textContent = image.mpp
           ? ((image.mpp[0] + image.mpp[1]) / 2).toFixed(4)
           : "N/A";
         document.getElementById("i-levels").textContent = image.level_count;
-        document.getElementById(
-          "i-zoom"
-        ).textContent = `${image.min_zoom} – ${image.max_zoom}`;
+        document.getElementById("i-zoom").textContent =
+          `${image.min_zoom} – ${image.max_zoom}`;
         document.getElementById("i-tile").textContent = `${image.tile_size} px`;
         const mask = slideInfo.mask;
         document.getElementById("i-mask").textContent = mask
@@ -752,8 +750,8 @@
               mask.dimensions[1]
             } (1/${mask.scale[0].toFixed(1)})`
           : slideInfo.mask_declared
-          ? "missing"
-          : "none";
+            ? "missing"
+            : "none";
       }
 
       function selectImage(index) {
@@ -778,7 +776,7 @@
         });
         select.value = currentImageIndex;
         select.addEventListener("change", (e) =>
-          selectImage(parseInt(e.target.value, 10))
+          selectImage(parseInt(e.target.value, 10)),
         );
       }
 
@@ -789,7 +787,7 @@
           return;
         }
         const resp = await fetch(
-          withSlide("/info") + "&scope=" + encodeURIComponent(scopeParam)
+          withSlide("/info") + "&scope=" + encodeURIComponent(scopeParam),
         );
         if (!resp.ok) {
           const detail = await resp.text();
@@ -853,20 +851,20 @@
             <i class="tick tick-pred" style="left:${at(p.prob)}%"></i>
           </div>
           <div class="ramp-ends"><span>${r.lo.toFixed(
-            2
+            2,
           )}</span><span>${r.hi.toFixed(2)}</span></div>
           <div class="cls" style="margin-top:6px">
             <span class="cls-name">predicted</span><span class="cls-val">${p.prob.toFixed(
-              3
+              3,
             )}</span>
           </div>
           <div class="cls"><span class="cls-name">true</span><span class="cls-val">${p.label.toFixed(
-            3
+            3,
           )}</span></div>
           <div class="cls"><span class="cls-name">error</span>
             <span class="cls-val">${error >= 0 ? "+" : ""}${error.toFixed(
-          3
-        )}</span></div>
+              3,
+            )}</span></div>
           ${
             beats === null
               ? ""
@@ -917,7 +915,7 @@
         let d = `M ${x(0)} ${y(1)}`;
         s.edges.forEach((e, j) => {
           d += ` L ${x(e)} ${y(j === 0 ? 1 : s.surv[j - 1])} L ${x(e)} ${y(
-            s.surv[j]
+            s.surv[j],
           )}`;
         });
         d += ` L ${x(tMax)} ${y(s.surv[s.surv.length - 1])}`;
@@ -928,7 +926,7 @@
           let rd = `M ${x(0)} ${y(1)}`;
           s.km_times.forEach((t, i) => {
             rd += ` L ${x(t)} ${y(i === 0 ? 1 : s.km_surv[i - 1])} L ${x(
-              t
+              t,
             )} ${y(s.km_surv[i])}`;
           });
           rd += ` L ${x(tMax)} ${y(s.km_surv[s.km_surv.length - 1])}`;
@@ -938,7 +936,7 @@
           time === null
             ? ""
             : `<line class="surv-obs" x1="${x(time)}" y1="${T}" x2="${x(
-                time
+                time,
               )}" y2="${H - B}"
                      ${event ? "" : 'stroke-dasharray="3 2"'} />`;
         const riskier =
@@ -948,20 +946,20 @@
         return `
           <svg class="surv-plot" viewBox="0 0 ${W} ${H}">
             <line class="surv-grid" x1="${L}" y1="${y(1)}" x2="${
-          W - R
-        }" y2="${y(1)}" />
+              W - R
+            }" y2="${y(1)}" />
             <line class="surv-grid" x1="${L}" y1="${y(0)}" x2="${
-          W - R
-        }" y2="${y(0)}" />
+              W - R
+            }" y2="${y(0)}" />
             <line class="surv-grid" x1="${L}" y1="${T}" x2="${L}" y2="${
-          H - B
-        }" />
+              H - B
+            }" />
             <text class="surv-txt" x="2" y="${y(1) + 3}">1.0</text>
             <text class="surv-txt" x="2" y="${y(0) + 3}">0.0</text>
             <text class="surv-txt" x="${L}" y="${H - 5}">0</text>
             <text class="surv-txt" x="${W - R}" y="${
-          H - 5
-        }" text-anchor="end">${Math.round(tMax)}</text>
+              H - 5
+            }" text-anchor="end">${Math.round(tMax)}</text>
             ${ref}
             ${obs}
             <path class="surv-step" d="${d}" />
@@ -974,10 +972,10 @@
               ? ""
               : `<div class="cls" style="margin-top:8px">
                    <span class="cls-name" style="flex:0 0 120px">P(event-free ${Math.round(
-                     time
+                     time,
                    )})</span>
                    <span class="cls-val">${survAt(s, time).toFixed(
-                     3
+                     3,
                    )}</span></div>`
           }
           ${
@@ -999,7 +997,7 @@
       }
 
       // Shows the model's output as it comes out of the head: one sigmoid for binary, the whole
-      // softmax vector for multiclass. This is the fold's own prediction, not the ensemble.
+      // softmax vector for multiclass. The prediction is from the outer fold that tested the slide.
       function showPrediction() {
         const p = slideInfo.prediction;
         if (!p) return;
@@ -1017,25 +1015,25 @@
           lines.push(
             `mean of ${att.inners.length} inner model${
               att.inners.length === 1 ? "" : "s"
-            } ` + `(${att.inners.map((i) => "i" + i).join(", ")})`
+            } ` + `(${att.inners.map((i) => "i" + i).join(", ")})`,
           );
         }
         if (r) {
           lines.push(
             `${r.n_slides} slides · r ${r.pearson_r.toFixed(
-              2
+              2,
             )} · median error ` +
               `${r.median_abs_error.toFixed(3)} (${(
                 r.median_abs_error / r.label_sd
-              ).toFixed(2)}× label sd)`
+              ).toFixed(2)}× label sd)`,
           );
         }
         if (p.survival && p.survival.n_slides) {
           lines.push(
             `${p.survival.n_patients} patients / ${p.survival.n_slides} slides · ` +
               `${p.survival.n_events} events · median follow-up ${Math.round(
-                p.survival.median_follow_up
-              )}`
+                p.survival.median_follow_up,
+              )}`,
           );
         }
         stats.innerHTML = lines.join("<br />");
@@ -1051,10 +1049,10 @@
               }">
                    <span class="cls-name">${className(k)}</span>
                    <span class="cls-bar"><i style="width:${(v * 100).toFixed(
-                     1
+                     1,
                    )}%"></i></span>
                    <span class="cls-val">${v.toFixed(3)}</span>
-                 </div>`
+                 </div>`,
             )
             .join("");
         } else if (p.endpoint_type === "binary") {
@@ -1062,7 +1060,7 @@
           detail.innerHTML = `<div class="cls cls-top">
                <span class="cls-name">sigmoid</span>
                <span class="cls-bar"><i style="width:${(p.prob * 100).toFixed(
-                 1
+                 1,
                )}%"></i></span>
                <span class="cls-val">${p.prob.toFixed(3)}</span>
              </div>`;
@@ -1097,8 +1095,8 @@
             outcome !== null
               ? outcome
               : Number.isInteger(p.label)
-              ? className(Number(p.label))
-              : Number(p.label).toFixed(3);
+                ? className(Number(p.label))
+                : Number(p.label).toFixed(3);
           document.getElementById("truth-row").style.display = "table-row";
         }
       }
@@ -1117,7 +1115,7 @@
         const hi = (attnSorted[n - 1] / total) * kept;
         updateDistribution();
         document.getElementById("attn-lo").textContent = `${lo.toFixed(
-          1
+          1,
         )}× mean`;
         document.getElementById("attn-hi").textContent = `${hi.toFixed(1)}×`;
         const rawK = parseInt(document.getElementById("attn-topk").value, 10);
@@ -1132,11 +1130,11 @@
           a.consistency === null || a.consistency === undefined
             ? ""
             : `<br />attention agreement ${a.consistency.toFixed(
-                2
+                2,
               )} between models`;
         document.getElementById("attn-label").innerHTML =
           `top tile holds ${((attnSorted[n - 1] / total) * 100).toFixed(
-            1
+            1,
           )}% of attention` + agree;
       }
 
@@ -1156,7 +1154,7 @@
         for (let i = 0; i < n; i++) {
           cum += desc[i];
           pts.push(
-            `${lx(i + 1).toFixed(1)},${(H - cum * (H - 2) - 1).toFixed(1)}`
+            `${lx(i + 1).toFixed(1)},${(H - cum * (H - 2) - 1).toFixed(1)}`,
           );
         }
 
@@ -1170,7 +1168,7 @@
             W - cutX
           }" height="${H}" fill="#7f1d1d" opacity="0.35"/>` +
           `<polyline points="${pts.join(
-            " "
+            " ",
           )}" fill="none" stroke="#fbbf24" stroke-width="1.5"/>` +
           (k === null
             ? ""
@@ -1180,7 +1178,7 @@
           k === null
             ? `${n} tiles · all attention kept`
             : `k=${k} keeps ${(retained * 100).toFixed(
-                1
+                1,
               )}% of attention, drops ${n - Math.min(k, n)} tiles`;
       }
 
@@ -1190,9 +1188,8 @@
         const a = slideInfo.attention;
         const [r, g, b] = ATTENTION_RGB;
         // Alpha carries the weight, so the ramp is drawn over the page background to match.
-        document.getElementById(
-          "attn-ramp"
-        ).style.background = `linear-gradient(to right, rgba(${r},${g},${b},0) 0%, rgba(${r},${g},${b},1) 100%)`;
+        document.getElementById("attn-ramp").style.background =
+          `linear-gradient(to right, rgba(${r},${g},${b},0) 0%, rgba(${r},${g},${b},1) 100%)`;
         updateLegend();
         document
           .getElementById("attn-toggle")

@@ -18,8 +18,11 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import torch
+
 from dlux.eval.predictions import write_predictions_npz
-from dlux.eval.run_records import (
+from dlux.tasks.survival import survival_risk
+from dlux.viewer.run_records import (
     SurvivalCurve,
     _average_predictions,
     _combine_curves,
@@ -36,8 +39,7 @@ def _fold_npz(path, edges, logits, labels, slide_ids):
             # One patient per slide unless a caller repeats a code, so the patient rollup is exercised.
             "patient_codes": [s.rsplit("/", 1)[0] for s in slide_ids],
             "logits": np.asarray(logits, dtype=np.float64),
-            # risk = -sum_j S_j, i.e. the cumulative product of (1 - hazard), as survival_risk computes it
-            "probs": -np.cumprod(1.0 - 1.0 / (1.0 + np.exp(-np.asarray(logits, dtype=np.float64))), axis=1).sum(axis=1),
+            "probs": survival_risk(torch.as_tensor(np.asarray(logits, dtype=np.float64))).numpy(),
             "labels": np.asarray(labels, dtype=np.float64),
             "endpoint_type": "survival",
             "num_classes": np.asarray(logits).shape[1],
@@ -60,7 +62,7 @@ def test_curve_reads_hazards_onto_the_persisted_edges(tmp_path):
 
 
 def test_survival_without_edges_is_refused(tmp_path):
-    # A pre-edges artifact: hazards with no time axis to place them on.
+    # An artifact with hazards but no `time_edges`: no time axis to place them on.
     path = tmp_path / "old.npz"
     np.savez_compressed(
         path,
@@ -178,3 +180,19 @@ def test_km_reference_counts_patients_not_slides(tmp_path):
     assert summary.km_surv == sorted(summary.km_surv, reverse=True)
     assert summary.km_surv[-1] == pytest.approx(0.0)  # both patients had the event
     assert len(summary.km_times) == len(summary.km_surv)
+
+
+def test_a_fold_without_metadata_is_not_read(tmp_path):
+    from dlux.eval.attention import write_attention_npz
+    from dlux.viewer.run_records import load_run_records
+
+    for name, complete in (("os_cv_o0_i0", True), ("os_cv_o1_i0", False)):
+        fold = tmp_path / name
+        write_attention_npz([(f"slide_{name}", np.zeros((2, 3)))], fold / "attention.npz", tiling=None)
+        if complete:
+            (fold / "metadata.json").write_text("{}")
+
+    records = load_run_records(tmp_path, "os", inner=None)
+
+    assert records is not None
+    assert records.folds == ["os_cv_o0"] and set(records.attention) == {"slide_os_cv_o0_i0"}

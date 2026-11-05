@@ -26,8 +26,10 @@ from __future__ import annotations
 
 from dlux.modalities.bulk_rna import BulkRNA
 from dlux.modalities.patient_field import PatientField
+from dlux.modalities.patient_field_tile import PatientFieldTile
 from dlux.modalities.tile_features import TileFeatures
+from dlux.modalities.tile_image import TileImage
 
-MODALITIES = {modality.name: modality for modality in (TileFeatures, BulkRNA, PatientField)}
+MODALITIES = {modality.name: modality for modality in (TileFeatures, TileImage, BulkRNA)}
 
-__all__ = ["MODALITIES", "BulkRNA", "PatientField", "TileFeatures"]
+__all__ = ["MODALITIES", "BulkRNA", "PatientField", "PatientFieldTile", "TileFeatures", "TileImage"]

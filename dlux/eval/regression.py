@@ -13,9 +13,8 @@
 # limitations under the License.
 """Regression endpoint (scalar continuous target): metric labels + fn, predicted-vs-actual scatter,
 headline, and both handlers, ``AGGREGATE_HANDLER`` (internal reporting) and ``EXTERNAL_HANDLER``
-(scoring a held-out cohort). Shares the scalar aggregation core in ``_common``, this module only
-supplies the handlers. Imports down from ``_common`` only; ``ExternalResult`` is referenced solely in
-annotations (TYPE_CHECKING), so external.py can import this module."""
+(scoring a held-out cohort). Uses the aggregation core in ``_common``. Imports down from ``_common`` only;
+``ExternalResult`` is referenced solely in annotations (TYPE_CHECKING), so external.py can import this module."""
 
 from __future__ import annotations
 
@@ -25,14 +24,17 @@ from typing import TYPE_CHECKING, Dict, List
 
 import numpy as np
 
+from dlux.data import layout
 from dlux.eval._common import (
     AggregateResult,
+    LabelModel,
     _agg_pyplot,
     _EndpointHandler,
     _ExternalHandler,
     _float_labels,
     _fmt,
     _nan_is_missing,
+    write_scalar_patient_csv,
 )
 
 if TYPE_CHECKING:
@@ -134,6 +136,7 @@ def scatter_figure(actual: np.ndarray, preds: np.ndarray, title: str, stats: str
 
 
 def _artifacts_regression(res: AggregateResult, out_dir: Path, figures_dir: Path) -> None:
+    write_scalar_patient_csv(res, layout.per_patient_csv(out_dir, res.field), label_cast=lambda v: f"{v:.6f}")
     scatter_figure(
         np.array([p.label for p in res.patient_predictions], dtype=np.float64),
         np.array([p.ensemble_prob for p in res.patient_predictions], dtype=np.float64),
@@ -152,33 +155,38 @@ def _headline_regression(res: AggregateResult) -> str:
     )
 
 
-AGGREGATE_HANDLER = _EndpointHandler(
+MODEL = LabelModel(
     REGRESSION_METRIC_LABELS,
+    lambda labels, values, k: regression_metrics(labels, values),
+    has_positive_count=False,  # "positive" is a classification notion; a continuous target has none
+    label_array=_float_labels,  # raw values, not class indices
+    is_missing=_nan_is_missing,  # the objective's declared sentinel; a negative value is data
+    scalar_label_cast=float,
+)
+
+AGGREGATE_HANDLER = _EndpointHandler(
+    MODEL,
     _REGRESSION_FOOTER,
-    False,
     _artifacts_regression,
     _headline_regression,
-    metrics=lambda labels, values, k: regression_metrics(labels, values),
-    patient_row=lambda p: (f"{p.ensemble_prob:.6f}", f"{p.label:.6f}"),
     strip_group="regression",
 )
 
 
 # -- external scoring --------------------------------------------------------
 def _write_external_regression_patient_csv(results: List["ExternalResult"], out_dir: Path) -> None:
-    """Long-format per-patient predictions across the regression endpoints: one row per (field x patient
-    x model), model = each outer-fold ensemble (o0..oK) plus grand. Same shape as binary's, with the raw
-    predicted value in place of a probability."""
-    with (out_dir / "per_patient_external_regression.csv").open("w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["field", "patient_code", "model", "predicted", "actual"])
-        for res in results:
+    """One CSV per field, for people: one row per (patient x model), model = each outer-fold ensemble
+    (o0..oK) plus grand. Same shape as binary's, with the raw predicted value in place of a probability."""
+    for res in results:
+        with layout.per_patient_csv(out_dir, res.field).open("w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["patient_code", "model", "predicted", "actual"])
             for p in sorted(res.labels):
                 for model, prob_map in [
                     *((f"o{o}", res.per_outer_patient_probs[o]) for o in res.outer_folds),
                     ("grand", res.grand_patient_probs),
                 ]:
-                    w.writerow([res.field, p, model, f"{float(prob_map[p]):.6f}", f"{float(res.labels[p]):.6f}"])
+                    w.writerow([p, model, f"{float(prob_map[p]):.6f}", f"{float(res.labels[p]):.6f}"])
 
 
 def _plot_external_scatter(result: "ExternalResult", figures_dir: Path) -> None:
@@ -198,15 +206,9 @@ def _plot_external_scatter(result: "ExternalResult", figures_dir: Path) -> None:
 
 
 EXTERNAL_HANDLER = _ExternalHandler(
-    REGRESSION_METRIC_LABELS,
-    lambda labels, values, k: regression_metrics(labels, values),
-    vector_probs=False,
-    has_positive_count=False,  # "positive" is a classification notion; a continuous target has none
+    MODEL,
     write_patient_csv=_write_external_regression_patient_csv,
     write_artifact=_plot_external_scatter,
-    label_array=_float_labels,  # raw values, not class indices
-    is_missing=_nan_is_missing,  # the objective's declared sentinel; a negative value is data
-    scalar_label_cast=float,
     # Regression joins no cross-field strip: that figure frames scores in [0,1] against a 0.5 chance
     # line, which is meaningless for R²/MAE/Spearman. Its per-field scatter carries the same information.
     strip_group="",

@@ -26,8 +26,8 @@ when `--n-per-class` is omitted (the full-cohort run). It then writes:
 Both are public text (no pixels) and are COMMITTED as the source of truth: re-running may drift as GDC
 updates, so the committed files are what makes the example byte-reproducible. Stdlib only. Needs internet.
 
-The tissue-source-site names and filters were verified against the live GDC API (2026-08-26): both centers
-carry ample BRCA and COAD diagnostic slides.
+The tissue-source-site names below are GDC's own (``cases.tissue_source_site.name``). Both centers carry
+ample BRCA and COAD diagnostic slides.
 """
 
 from __future__ import annotations
@@ -41,8 +41,8 @@ from pathlib import Path
 GDC_FILES_ENDPOINT = "https://api.gdc.cancer.gov/files"
 PROJECTS = ["TCGA-BRCA", "TCGA-COAD"]
 
-# center slug -> GDC `cases.tissue_source_site.name` (verified against the live API 2026-08-26:
-# Christiana Healthcare has 59 BRCA / 49 COAD diagnostic slides, MSKCC 47 / 37).
+# center slug -> GDC `cases.tissue_source_site.name`. Each center has more BRCA and COAD diagnostic slides
+# on GDC than the committed manifests pin.
 CENTER_TO_TSS = {
     "christiana": "Christiana Healthcare",
     "mskcc": "MSKCC",

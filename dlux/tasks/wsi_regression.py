@@ -11,10 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""WSIRegressionTask, a patient-level continuous endpoint from one precomputed slide-feature set.
+"""WSIRegressionTask, a patient-level continuous endpoint from the declared input streams.
 
-Attention-MIL (ABMIL) aggregates each slide's tile-feature bag into one scalar prediction (the head
-outputs 1 value, used raw, no activation), trained with MSE. The target is a patient value mapped
+The input streams feed the configured model, which outputs one scalar prediction (used raw, no
+activation), trained with MSE. The target is a patient value mapped
 through the contract's numeric transform (raw -> float, NaN for missing/out-of-map, masked in the
 loss + metrics). A separate task from WSIClassificationTask; both plug into the same LightningModule.
 """
@@ -33,12 +33,13 @@ from ahcore.tasks.interfaces import TaskWithMetrics
 
 from dlux.config.cohort import ContractField, Objective, SplitCategory
 from dlux.modalities import PatientField
+from dlux.tasks.fit_state import FitState
 from dlux.tasks.regression import build_regression_metrics, regression_loss, regression_metric_tensors
 from dlux.tasks.target import build_field_transform
 
 
 class WSIRegressionTask(ConcreteTaskWithAdapters, TaskWithMetrics):
-    """Continuous patient endpoint from one precomputed slide-feature set (ABMIL, MSE)."""
+    """Continuous patient endpoint from the declared input streams (MSE)."""
 
     name = "wsi_regression"
 
@@ -58,9 +59,10 @@ class WSIRegressionTask(ConcreteTaskWithAdapters, TaskWithMetrics):
                 f"WSIRegressionTask handles regression objectives only, got '{contract_field.objective.value}' — "
                 f"use WSIClassificationTask for binary/multiclass."
             )
-        self._target = target
         # Keyed on the sheet column, not the endpoint name, the contract may redirect one to the other.
-        self._label_column = contract_field.source.column
+        # Cohort injects the contract key as the column of a field that does not name one, and
+        # `target` is that key, so the same rule applies to a field built on its own.
+        self._label_column = contract_field.source.column or target
         self._label_key = f"patient.{self._label_column}"
         # raw value -> float target (NaN for missing/out-of-map) via the single target-transform seam
         self._target_transform = build_field_transform(contract_field, target_stats)
@@ -114,13 +116,8 @@ class WSIRegressionTask(ConcreteTaskWithAdapters, TaskWithMetrics):
         preds_raw = predictions["logits"] * self._target_std + self._target_mean
         return regression_metric_tensors(preds_raw, targets["label"])
 
-    @property
-    def target_mean(self) -> float:
-        return self._target_mean
-
-    @property
-    def target_std(self) -> float:
-        return self._target_std
+    def fit_state(self) -> FitState:
+        return FitState(pred_mean=self._target_mean, pred_std=self._target_std)
 
     def train_metrics(self) -> MetricCollection:
         return build_regression_metrics(SplitCategory.FIT)
@@ -133,5 +130,5 @@ class WSIRegressionTask(ConcreteTaskWithAdapters, TaskWithMetrics):
 
     @property
     def num_classes(self) -> int:
-        """The ABMIL head outputs a single scalar for regression."""
+        """The model head outputs a single scalar for regression."""
         return 1

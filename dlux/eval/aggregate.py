@@ -22,12 +22,13 @@ inner-replicate models predict the same held-out TEST patients (shared-TEST inva
 roll each replicate's slide probs to patient level (mean), then average across replicates
 (mean-of-probs) to get one out-of-fold prediction per patient. Metrics are computed per
 outer fold (→ mean ± std) and on the pooled out-of-fold set (the outer folds partition the
-cohort). Binary, multiclass, regression, expression and survival endpoints each have their own
-aggregation core (survival's label is a coupled ``(time, event)`` pair scored by Harrell's C).
+cohort). Every objective runs through the one aggregation core (``_common.aggregate_field``) with
+its own label model and metrics. Survival's label is a coupled ``(time, event)`` pair scored by
+Harrell's C.
 
 **Metrics.** Binary: AUROC + AP are threshold-free; accuracy, balanced accuracy, sensitivity,
-specificity, precision and F1 at a fixed threshold 0.5, deliberately not tuned (tuning on the
-held-out folds would be a double-dip). Multiclass: macro one-vs-rest AUROC, accuracy, balanced
+specificity, precision, NPV, F1, MCC and Cohen's kappa at a fixed threshold 0.5, deliberately not
+tuned (tuning on the held-out folds would be a double-dip). Multiclass: macro one-vs-rest AUROC, accuracy, balanced
 accuracy (mean per-class recall) and macro-F1 in the per-fold table, with a per-class breakdown
 (AUROC/precision/recall/F1) + a confusion matrix on the pooled OOF; class assignment is argmax
 (no tuned threshold).
@@ -38,28 +39,27 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Sequence
 
 import numpy as np
 
 from dlux.config.cohort import Objective
+from dlux.data import layout
 from dlux.data.splits import parse_cv_split
 from dlux.eval._common import (
     AggregateResult,
-    _aggregate_field,
     _EndpointHandler,
     _fmt,
+    aggregate_field,
     load_fold_predictions,
+    write_per_patient_npz,
 )
 from dlux.eval.binary import AGGREGATE_HANDLER as _BINARY_AGGREGATE_HANDLER
 from dlux.eval.binary import BINARY_METRIC_LABELS
 from dlux.eval.multiclass import AGGREGATE_HANDLER as _MULTICLASS_AGGREGATE_HANDLER
-from dlux.eval.multiclass import _aggregate_field_multiclass
 from dlux.eval.regression import AGGREGATE_HANDLER as _REGRESSION_AGGREGATE_HANDLER
 from dlux.eval.regression_vector import AGGREGATE_HANDLER as _REGRESSION_VECTOR_AGGREGATE_HANDLER
-from dlux.eval.regression_vector import _aggregate_field_expression
 from dlux.eval.survival import AGGREGATE_HANDLER as _SURVIVAL_AGGREGATE_HANDLER
-from dlux.eval.survival import _aggregate_field_survival
 
 logger = logging.getLogger(__name__)
 
@@ -68,18 +68,13 @@ _PREDICTIONS = "test_predictions.npz"
 
 
 def _read_meta(fold_dir: Path) -> dict:
-    """A fold's metadata.json as a dict, or ``{}`` when it cannot be read."""
-    try:
-        return json.loads((fold_dir / _SENTINEL).read_text())
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def _grid_of(meta: dict) -> Optional[tuple[int, int]]:
-    """Expected (n_outer, n_inner) stamped in a fold's metadata, or None if not recorded."""
-    if "n_outer" in meta and "n_inner" in meta:
-        return int(meta["n_outer"]), int(meta["n_inner"])
-    return None
+    """A fold's metadata.json, which must record the CV grid and the TEST coverage."""
+    path = fold_dir / _SENTINEL
+    meta = json.loads(path.read_text())
+    missing = sorted({"n_outer", "n_inner", "test_coverage"} - set(meta))
+    if missing:
+        raise ValueError(f"{path} lacks {missing}. Re-run that fold.")
+    return meta
 
 
 def _discover_folds(
@@ -87,7 +82,7 @@ def _discover_folds(
 ) -> tuple[
     Dict[tuple[str, int], List[tuple[int, Path]]],
     Dict[str, tuple[int, int]],
-    Dict[tuple[str, int], Optional[dict]],
+    Dict[tuple[str, int], dict],
 ]:
     """Scan for completed nested-CV folds -> (folds, grids, coverage).
 
@@ -95,10 +90,10 @@ def _discover_folds(
     metadata (for the strict completeness check). ``coverage`` carries each outer fold's declared-vs-scored
     TEST patients, read from the first inner replicate seen: the shared-TEST invariant makes the
     replicates of one outer fold score the same patients, so counting every replicate would multiply the
-    study's N by ``n_inner``. ``None`` when a fold recorded no coverage."""
+    study's N by ``n_inner``."""
     folds: Dict[tuple[str, int], List[tuple[int, Path]]] = {}
     grids: Dict[str, tuple[int, int]] = {}
-    coverage: Dict[tuple[str, int], Optional[dict]] = {}
+    coverage: Dict[tuple[str, int], dict] = {}
     for d in sorted(p for p in experiment_dir.iterdir() if p.is_dir()):
         if not (d / _SENTINEL).exists():  # sentinel absent -> fold incomplete, skip
             continue
@@ -112,54 +107,45 @@ def _discover_folds(
         folds.setdefault((field, outer), []).append((inner, npz))
         if field not in grids or (field, outer) not in coverage:
             meta = _read_meta(d)
-            if field not in grids and _grid_of(meta) is not None:
-                grids[field] = _grid_of(meta)  # type: ignore[assignment]
-            coverage.setdefault((field, outer), meta.get("test_coverage"))
+            grids.setdefault(field, (int(meta["n_outer"]), int(meta["n_inner"])))
+            coverage.setdefault((field, outer), meta["test_coverage"])
     return folds, grids, coverage
 
 
-def _roll_up_coverage(per_outer: Dict[int, Optional[dict]]) -> Optional[dict]:
-    """Union a field's per-outer TEST coverage into one study-level statement.
-
-    None if any outer fold recorded no coverage: a partial union would understate the loss and read as
-    full coverage. Outer folds partition the cohort, so declared and scored sum across them."""
-    if not per_outer or any(c is None for c in per_outer.values()):
-        return None
-    declared = sum(int(c["declared"]) for c in per_outer.values())  # type: ignore[index]
-    scored = sum(int(c["scored"]) for c in per_outer.values())  # type: ignore[index]
-    lost = sorted({str(p) for c in per_outer.values() for p in c["lost"]})  # type: ignore[index]
+def _roll_up_coverage(per_outer: Dict[int, dict]) -> dict:
+    """Union a field's per-outer TEST coverage into one study-level statement. Outer folds partition the
+    cohort, so declared and scored sum across them."""
+    covered = list(per_outer.values())
+    declared = sum(int(c["declared"]) for c in covered)
+    scored = sum(int(c["scored"]) for c in covered)
+    lost = sorted({str(p) for c in covered for p in c["lost"]})
     return {"declared": declared, "scored": scored, "lost": lost}
 
 
 def _verify_completeness(
     field: str,
     outer_to_reps: Dict[int, List[tuple[int, Path]]],
-    stamped: Optional[tuple[int, int]],
+    stamped: tuple[int, int],
     expected: tuple[int, int],
     strict: bool,
 ) -> None:
     """Completeness gate against the grid the study declares.
 
     The expected shape comes from config, not from a fold we happened to find: a grid read out of the
-    data cannot detect that the data is short. The grid stamped in fold metadata is still required, it
+    data cannot detect that the data is short. The grid stamped in fold metadata
     is cross-checked against the declared one, which catches a sweep whose config changed midway."""
-    if stamped is None:
-        raise ValueError(
-            f"[{field}] fold metadata is missing the CV grid (n_outer/n_inner). Re-run the sweep so its "
-            f"metadata records the grid."
-        )
     if stamped != expected:
         raise ValueError(
             f"[{field}] the folds were run on a {stamped[0]}x{stamped[1]} grid but the study declares "
             f"{expected[0]}x{expected[1]} — the sweep and the config disagree; re-run or fix the study."
         )
     n_outer, n_inner = expected
-    expected = {(o, i) for o in range(n_outer) for i in range(n_inner)}
+    expected_folds = {(o, i) for o in range(n_outer) for i in range(n_inner)}
     present = {(o, i) for o, reps in outer_to_reps.items() for (i, _npz) in reps}
-    missing = sorted(expected - present)
+    missing = sorted(expected_folds - present)
     if missing:
         msg = (
-            f"[{field}] INCOMPLETE sweep: {len(missing)}/{len(expected)} folds missing vs grid {n_outer}×{n_inner} "
+            f"[{field}] INCOMPLETE sweep: {len(missing)}/{len(expected_folds)} folds missing vs grid {n_outer}×{n_inner} "
             f"(missing: {['o%d_i%d' % m for m in missing[:12]]}{'…' if len(missing) > 12 else ''})"
         )
         if strict:
@@ -214,41 +200,25 @@ def aggregate_experiment(
     if random_experiment_dir is not None:
         random_folds, random_grids, _ = _discover_folds(Path(random_experiment_dir))
         if not random_folds:
-            logger.warning("random_experiment_dir %s has no completed folds; ignoring.", random_experiment_dir)
+            raise ValueError(f"random_experiment_dir {random_experiment_dir} has no completed folds.")
     expected_grid = (int(n_outer), int(n_inner))
     results: List[AggregateResult] = []
-    # Declared set, sorted order: which endpoints are reported is the study's call, but their order in
-    # the report is not a thing this step should change.
+    # Reports the declared endpoints that have folds, in sorted order.
     for field in sorted(f for f in expected_fields if f in discovered):
         field_folds = {o: reps for (f, o), reps in folds.items() if f == field}
-        _verify_completeness(field, field_folds, grids.get(field), expected_grid, strict)
+        _verify_completeness(field, field_folds, grids[field], expected_grid, strict)
         first_npz = sorted(next(iter(field_folds.values())))[0][1]  # peek endpoint type to dispatch
         endpoint_type = load_fold_predictions(first_npz)["endpoint_type"]
-        # Core dispatch stays an explicit if-chain (not a registry lookup): the expression core alone
-        # takes a `random_reps` arg (the SEQUOIA random baseline), so the core signatures aren't uniform.
-        if endpoint_type == Objective.regression_vector:
+        handler = _handler(endpoint_type)
+        rand_reps = None
+        if handler.uses_random_baseline and random_experiment_dir is not None:
             rand_reps = {o: reps for (f, o), reps in random_folds.items() if f == field} or None
             # The null feeds a reported statistic (the trained-vs-random gene count), so it is held to the
-            # same declared grid as the trained arm. Checking only "are there any folds at all" let a
-            # short null through silently, changing that count without saying so.
-            if random_experiment_dir is not None:
-                if rand_reps is None:
-                    logger.warning(
-                        "[%s] random_experiment_dir has no completed folds for this endpoint — reporting "
-                        "without the trained-vs-random comparison.",
-                        field,
-                    )
-                else:
-                    _verify_completeness(
-                        f"{field} (random baseline)", rand_reps, random_grids.get(field), expected_grid, strict
-                    )
-            res = _aggregate_field_expression(field, field_folds, random_reps=rand_reps)
-        elif endpoint_type == Objective.multiclass:
-            res = _aggregate_field_multiclass(field, field_folds)
-        elif endpoint_type == Objective.survival:
-            res = _aggregate_field_survival(field, field_folds)
-        else:
-            res = _aggregate_field(field, field_folds, _handler(endpoint_type))
+            # same declared grid as the trained arm.
+            if rand_reps is None:
+                raise ValueError(f"[{field}] random_experiment_dir has no completed folds for this endpoint.")
+            _verify_completeness(f"{field} (random baseline)", rand_reps, random_grids[field], expected_grid, strict)
+        res = aggregate_field(field, endpoint_type, field_folds, handler, random_reps=rand_reps)
         # Coverage comes from run metadata rather than from the predictions, so it is attached here and
         # the cores stay unaware of it, they only ever see patients that were scored.
         res.coverage = _roll_up_coverage({o: c for (f, o), c in coverage.items() if f == field})
@@ -266,15 +236,24 @@ def aggregate_experiment(
 
 # -- reporting (csv + markdown + figures) ------------------------------------
 def write_reports(results: List[AggregateResult], experiment_name: str, out_dir: str | Path) -> Path:
-    """Write per-patient + per-fold CSVs, a summary.md (with a per-fold metric table), and figures."""
+    """Write each endpoint's ``per_patient_<field>.npz`` (the record that readers of these results read), its
+    per-patient CSV and the per-fold CSV for people, a summary.md (with a per-fold metric table), and figures.
+    The folder is written in full before it replaces the previous one (``layout.replaced_dir``)."""
     out_dir = Path(out_dir)
+    with layout.replaced_dir(out_dir) as tmp:
+        _write_reports_into(results, experiment_name, tmp)
+    return out_dir
+
+
+def _write_reports_into(results: List[AggregateResult], experiment_name: str, out_dir: Path) -> None:
     figures_dir = out_dir / "figures"
     figures_dir.mkdir(parents=True, exist_ok=True)
 
-    _write_per_patient_csv(results, out_dir / "per_patient_ensemble.csv")
-    _write_per_fold_csv(results, out_dir / "per_fold_metrics.csv")
+    _write_per_fold_csv(results, layout.per_fold_metrics_csv(out_dir))
     for res in results:
-        _handler(res.endpoint_type).write_artifacts(res, out_dir, figures_dir)
+        handler = _handler(res.endpoint_type)
+        write_per_patient_npz(res, layout.per_patient_npz(out_dir, res.field), dtypes=handler.npz_dtypes)
+        handler.write_artifacts(res, out_dir, figures_dir)
     # Combined cross-field per-fold strips: group results by the handler's declared strip_group (so this
     # driver holds no per-objective membership lists), then plot each group with its metric + filename.
     strips: Dict[str, List[AggregateResult]] = {}
@@ -291,34 +270,25 @@ def write_reports(results: List[AggregateResult], experiment_name: str, out_dir:
     if strips.get("survival"):
         _plot_metric_by_fold(strips["survival"], "c_index", "C-index", figures_dir / "c_index_by_fold.png")
     # Written last so it can link every figure the handlers and strip plotters just produced.
-    _write_summary_md(results, experiment_name, out_dir / "summary.md", figures_dir)
-    return out_dir
-
-
-def _write_per_patient_csv(results: List[AggregateResult], path: Path) -> None:
-    import csv
-
-    with Path(path).open("w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["field", "outer_fold", "patient_code", "ensemble_prediction", "label", "n_replicates"])
-        for res in results:
-            patient_row = _handler(res.endpoint_type).patient_row  # (pred, label) formatting per endpoint
-            for p in res.patient_predictions:
-                pred, label = patient_row(p)
-                w.writerow([p.field, p.outer_fold, p.patient_code, pred, label, p.n_replicates])
+    _write_summary_md(results, experiment_name, layout.summary_md(out_dir), figures_dir)
 
 
 def _write_per_fold_csv(results: List[AggregateResult], path: Path) -> None:
     import csv
 
-    labels = _handler(results[0].endpoint_type).metric_labels if results else BINARY_METRIC_LABELS
+    # One column per metric any endpoint reports, so a study that mixes objectives keeps every value under
+    # its own name. A metric an endpoint does not report is left empty.
+    labels = list(dict.fromkeys(k for res in results for k in _handler(res.endpoint_type).model.metric_labels))
+    if not results:
+        labels = list(BINARY_METRIC_LABELS)
     with Path(path).open("w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["field", "outer_fold", "n_patients", "n_positive", *labels])
         for res in results:
-            keys = _handler(res.endpoint_type).metric_labels
+            keys = set(_handler(res.endpoint_type).model.metric_labels)
             for m in res.per_outer:
-                w.writerow([m.field, m.outer_fold, m.n_patients, m.n_positive, *(f"{m.metrics[k]:.6f}" for k in keys)])
+                values = (f"{m.metrics[k]:.6f}" if k in keys else "" for k in labels)
+                w.writerow([m.field, m.outer_fold, m.n_patients, m.n_positive, *values])
 
 
 def _figure_links(figures_dir: Path, field: str | None, claimed: set[Path]) -> List[str]:
@@ -337,13 +307,12 @@ def _figure_links(figures_dir: Path, field: str | None, claimed: set[Path]) -> L
 
 
 def _coverage_lines(res: AggregateResult) -> List[str]:
-    """State the TEST coverage whenever it is not total, and say so when it is not known.
+    """State the TEST coverage whenever it is not total.
 
     Without this line a reduced N is silent: the table's own n is the number of patients that were
     scored, so an endpoint that lost patients to `min_tiles` or to a missing feature cache reports
     a smaller cohort with nothing marking the difference. Full coverage needs no line."""
-    if res.coverage is None:
-        return ["**Coverage unknown** — these runs recorded no declared-vs-scored coverage.", ""]
+    assert res.coverage is not None  # aggregate sets it for every endpoint
     declared, lost = res.coverage["declared"], res.coverage["lost"]
     if not lost:
         return []
@@ -362,9 +331,9 @@ def _write_summary_md(
     lines = [f"# Aggregate — {experiment_name}", ""]
     for res in results:
         handler = _handler(res.endpoint_type)
-        labels = handler.metric_labels
+        labels = handler.model.metric_labels
         cols = list(labels.values())
-        has_pos = handler.has_positive_count  # only classification carries a positive count
+        has_pos = handler.model.has_positive_count  # only classification carries a positive count
         pos_col, pos_sep = (" pos |", "--:|") if has_pos else ("", "")
         rows = [
             f"| fold | n |{pos_col} " + " | ".join(cols) + " |",
@@ -447,8 +416,7 @@ def _plot_auroc_by_fold(results: List[AggregateResult], path: Path) -> None:
 
 
 def _plot_metric_by_fold(results: List[AggregateResult], key: str, label: str, path: Path) -> None:
-    """Strip of per-outer-fold values of one metric, one column per field (regression analog of the
-    per-fold AUROC strip)."""
+    """Strip of per-outer-fold values of one metric, one column per field."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -478,10 +446,9 @@ def _plot_metric_by_fold(results: List[AggregateResult], key: str, label: str, p
 
 
 # -- endpoint handlers (dispatched on objective via _HANDLERS) ----------------
-# A handler owns one endpoint kind's reporting: metric column labels, the summary footer, whether a
-# per-fold positive count applies, the summary's extra callout lines, and the per-field artifacts
-# (figure + any csv). The numeric aggregation cores (_aggregate_field / _aggregate_field_expression)
-# stay separate: scalar and per-gene-vector pooling are different shapes.
+# A handler owns one endpoint kind's reporting: its label model and metrics for ``aggregate_field``, metric
+# column labels, the summary footer, whether a per-fold positive count applies, the summary's extra
+# callout lines, and the per-field artifacts (figure + any csv).
 _HANDLERS: Dict[str, _EndpointHandler] = {
     "binary": _BINARY_AGGREGATE_HANDLER,
     "multiclass": _MULTICLASS_AGGREGATE_HANDLER,
@@ -493,7 +460,7 @@ _HANDLERS: Dict[str, _EndpointHandler] = {
 
 def _handler(endpoint_type: Objective) -> _EndpointHandler:
     try:
-        return _HANDLERS[endpoint_type]  # str-enum keys the string-keyed registry transparently (Step 3 re-keys)
+        return _HANDLERS[endpoint_type]  # a str enum, so it keys the string-keyed registry
     except KeyError:
         raise NotImplementedError(f"aggregate reporting supports {sorted(_HANDLERS)} (got '{endpoint_type}').")
 

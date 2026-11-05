@@ -69,12 +69,12 @@ class BulkRNA:
         self.missing = missing
         self._warned_imputed = False
         self.matrix_path = Path(matrix_path)
-        self.gene_ids = gene_ids
+        self.gene_ids = [str(g) for g in gene_ids] if gene_ids is not None else None
         self.panel_name = panel_name
         self._set_stats(gene_means, gene_stds)
 
     def _set_stats(self, gene_means, gene_stds) -> None:
-        """The one place the per-gene statistics are installed, so construction and per-fold replay
+        """The one place the per-gene statistics are installed, so construction and the per-fold restore
         cannot drift apart."""
         means = torch.as_tensor(np.asarray(gene_means), dtype=torch.float32)
         stds = torch.as_tensor(np.asarray(gene_stds), dtype=torch.float32)
@@ -124,8 +124,6 @@ class BulkRNA:
     def from_spec(cls, *, key: str, spec: dict, ctx: ModalityContext) -> "BulkRNA":
         """Construct from an ``inputs:`` entry, resolving this fold's per-gene statistics for the
         requested panel. Reads the fit split (via ctx) and nothing else."""
-        if "impute_missing" in spec:
-            raise ValueError(f"input '{key}' (bulk_rna): 'impute_missing' was renamed. Use missing: impute_mean.")
         unknown = set(spec) - {"modality", "gene_panel", "missing"}
         if unknown:
             raise ValueError(f"input '{key}' (bulk_rna): unknown option(s) {sorted(unknown)}")
@@ -142,7 +140,7 @@ class BulkRNA:
                 panels_dir=bulk_rna_matrix.panels_dir(ctx.cohorts_dir, ctx.cohort_name),
             )
         else:
-            gene_ids, means, stds = cls.replay_stats(recorded, key=key, matrix_path=matrix_path, gene_panel=panel)
+            gene_ids, means, stds = cls.recorded_stats(recorded, key=key, matrix_path=matrix_path, gene_panel=panel)
         return cls(
             key=key,
             matrix_path=matrix_path,
@@ -211,11 +209,11 @@ class BulkRNA:
         return rna_codes & manifest_codes
 
     def fit_state(self) -> dict:
-        """This stream's fit-derived state, for replay when scoring a cohort that has no fit split.
+        """This stream's fit-derived state, to restore when scoring a cohort that has no fit split.
 
         The gene identities travel with the statistics because a panel name does not pin them down: a
         data-derived panel like ``hvg2000`` is computed per cohort, so two cohorts' ``hvg2000`` are
-        different gene sets. Replaying by name would silently score a model on the wrong genes."""
+        different gene sets. Restoring by name would silently score a model on the wrong genes."""
         return {
             "gene_ids": np.asarray(self.gene_ids),
             "gene_means": self.gene_means.numpy(),
@@ -224,7 +222,7 @@ class BulkRNA:
         }
 
     @staticmethod
-    def replay_stats(state: dict, *, key: str, matrix_path: Path, gene_panel: str) -> tuple:
+    def recorded_stats(state: dict, *, key: str, matrix_path: Path, gene_panel: str) -> tuple:
         """Restore recorded per-gene statistics, checking this cohort's matrix can supply those genes.
 
         The recorded gene ids win: the run's panel is deliberately not re-resolved against this cohort,
@@ -234,8 +232,8 @@ class BulkRNA:
         import pandas as pd
 
         recorded_ids = [str(g) for g in np.asarray(state["gene_ids"]).tolist()]
-        recorded_panel = state.get("panel_name")
-        if recorded_panel is not None and str(recorded_panel) != gene_panel:
+        recorded_panel = state["panel_name"]
+        if str(recorded_panel) != gene_panel:
             raise ValueError(
                 f"input '{key}' (bulk_rna): the run recorded gene_panel '{recorded_panel}' but this config "
                 f"asks for '{gene_panel}'. Score the model with the panel it was trained on."

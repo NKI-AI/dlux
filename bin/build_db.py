@@ -19,7 +19,7 @@
 The ``study`` assigns the cohort its role (→ split strategy) and owns the CV params. The ``cohort``
 describes the data source (inputs + contract). Both are plain structured configs (no ``_target_``),
 constructed as typed ``Study``/``Cohort`` here so they are validated. The DB is written to
-``{paths.studies_dir}/{study}/db/{cohort}.db``. Run once per cohort in the study.
+``{paths.studies_dir}/{study}/db/{cohort}/manifest.db``. Run once per cohort in the study.
 """
 
 from __future__ import annotations
@@ -28,14 +28,19 @@ import sys
 from pathlib import Path
 
 import hydra
-from dlux.config.cohort import Cohort, Study
-from dlux.data import layout
-from dlux.data.build_db import build_db
-from dlux.data.errors import BuildDbError
 from omegaconf import DictConfig, OmegaConf
 from pydantic import ValidationError
 
 from ahcore.utils.io import print_config
+
+from dlux.config.cohort import Cohort, Study
+from dlux.config.resolvers import register_resolvers
+from dlux.data import layout
+from dlux.data.build_db import build_db
+from dlux.data.errors import BuildDbError
+from dlux.data.slidescore import export_slidescore_key
+
+register_resolvers()
 
 
 @hydra.main(version_base=None, config_path="../config", config_name="build_db")
@@ -64,8 +69,9 @@ def main(cfg: DictConfig) -> None:
                 f"Pass a cohort listed in the study, or add it to study/{study.name}.yaml."
             )
         cohort = study.filter_contract(cohort)  # scope to the study's targets (splits + analysis)
+        # The geometry probe opens every slide, so a remote cohort needs its token before build_db.
+        export_slidescore_key(cohort, cfg)
         splits = study.splits_for(cohort.name)  # role -> strategy, composed with the study's params
-        database_uri = layout.db_uri(cfg.paths.studies_dir, study.name, cohort.name)
 
         probe_grid = OmegaConf.to_container(cfg.probe_grid, resolve=True) if cfg.get("probe_grid") is not None else None
         splits_cfg = cfg.get("splits")
@@ -73,7 +79,7 @@ def main(cfg: DictConfig) -> None:
         build_db(
             cohort,
             splits,
-            database_uri,
+            layout.db_dir(cfg.paths.studies_dir, study.name, cohort.name),
             patients_csv=Path(cfg.patients_csv),
             slides_csv=Path(cfg.slides_csv),
             probe=str(cfg.probe),

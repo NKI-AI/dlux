@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import pytest
+
 from dlux.data.gene_panel import panel_path, resolve_panel
 
 _MATRIX_GENES = [100, 200, 300, 400]  # native (int) matrix columns, like the real RSEM matrix

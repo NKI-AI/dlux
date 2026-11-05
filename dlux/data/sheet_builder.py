@@ -11,11 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Shared helpers for the per-cohort sheet builders (``scripts/cohort_builders/<cohort>/sheets.py``).
+"""Helpers for a cohort's sheet builder, the script a project writes for each cohort it owns.
 
-Each builder turns a cohort's metadata + slide layout into the dlux input sheets
-(``<cohort>_patients.csv`` + ``<cohort>_slides.csv``), which ``dlux build_db`` then ingests
-(probing geometry and generating splits). The builders never touch the DB, geometry, or splits.
+A builder turns a cohort's metadata and slide layout into the dlux input sheets (``patients.csv``,
+``slides.csv`` and an optional ``masks.csv``, see ``docs/specs/SHEET_SPEC.md``), which ``build_db`` then
+ingests (probing geometry and generating splits). The builders never touch the DB, geometry, or splits.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import pandas as pd
+
 from dlux.data.sheets import IMAGE_PATH, MASK_PATH, MASKS_SHEET, PATIENT_ID
 
 
@@ -35,13 +36,26 @@ def clean(value: object) -> str:
     return "" if s.lower() in ("nan", "none") else s
 
 
+def one_row_per_patient(meta: pd.DataFrame, patient_col: str, cohort: str) -> pd.DataFrame:
+    """The metadata with one row per patient. Rows repeated exactly count once. A patient whose rows differ
+    raises, so no builder chooses between them without saying so."""
+    meta = meta.drop_duplicates()
+    repeated = meta[patient_col][meta[patient_col].duplicated(keep=False)]
+    if not repeated.empty:
+        ids = sorted(set(repeated))
+        raise ValueError(
+            f"[{cohort}] {len(ids)} patient(s) have metadata rows that differ, e.g. {ids[:5]}. "
+            f"Settle them in the metadata before building the sheets."
+        )
+    return meta
+
+
 def index_masks(masks_dir: Optional[Path], mask_ext: str = ".tiff") -> Dict[str, str]:
     """Map mask *basename* → path (relative to ``masks_dir``), for NON-EMPTY files with extension
     ``mask_ext`` ONLY.
 
-    Restricting to the mask extension is the point: a bare stem match against *all* files
-    wrongly grabs unrelated artifacts (pickles, thumbnails, sidecar files) that merely share
-    a slide's stem. Zero-byte masks (a failed mask-generation run) are skipped so they read as
+    The extension filter keeps out unrelated files (pickles, thumbnails, sidecar files) that
+    share a slide's stem. Zero-byte masks (a failed mask-generation run) are skipped so they read as
     missing rather than crashing extraction with an unreadable-image error."""
     if masks_dir is None:
         return {}
@@ -54,7 +68,7 @@ def index_masks(masks_dir: Optional[Path], mask_ext: str = ".tiff") -> Dict[str,
 
 def mask_for(slide_path: Path, mask_index: Dict[str, str], mask_ext: str = ".tiff") -> Optional[str]:
     """Mask matching ``slide_path`` by the exact convention ``<slide stem><mask_ext>`` —
-    e.g. ``DCIS_X.svs`` → ``DCIS_X.tiff``, ``Y PRIM.ndpi`` → ``Y PRIM.tiff`` — else ``None``."""
+    e.g. ``T12_345.svs`` → ``T12_345.tiff``, ``Y PRIM.ndpi`` → ``Y PRIM.tiff`` — else ``None``."""
     return mask_index.get(slide_path.stem + mask_ext)
 
 
@@ -90,7 +104,7 @@ def write_sheets(out_dir: Path, prefix: str, patient_rows: List[Dict], slide_row
     masks we compute gets it from ``generate_masks``.
 
     ``prefix`` names the cohort in log lines only — the filenames are unprefixed because the cohort is
-    already the directory (layout A)."""
+    already the directory."""
     if not patient_rows:
         raise SystemExit(f"[{prefix}] no patients gathered — check --metadata-file / --images paths and columns.")
     out_dir.mkdir(parents=True, exist_ok=True)

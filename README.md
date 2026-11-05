@@ -26,12 +26,18 @@ dlux is a clone-and-run pipeline. Install it from a clone of this repo.
 
 ```bash
 git clone https://github.com/NKI-AI/dlux.git
-cd <repo>
+cd dlux
 python -m venv .venv && source .venv/bin/activate
 pip install .
 ```
 
-`pip install .` pulls in all dependencies from PyPI. You then run the pipeline stages from the clone with `python bin/<stage>.py`. dlux needs Python 3.11 or newer.
+`pip install .` pulls in all dependencies from PyPI. You then run the pipeline stages from the clone with `python bin/<stage>.py`. dlux needs Python 3.11, 3.12 or 3.13. It does not run on Python 3.14 yet, because hydra-core 1.3 fails at startup there.
+
+Slides are read through FASTSLIDE, which covers every format the pipeline has needed, so the OpenSlide binaries are not installed. A cohort that sets `default_reader: OPENSLIDE`, or a sheet with a per-slide `reader` column naming it, needs them:
+
+```bash
+pip install '.[openslide]'
+```
 
 ## Documentation
 
@@ -46,7 +52,7 @@ If you use dlux in your research, please cite it. The repository metadata lives 
   title   = {dlux: a standalone, application-agnostic pipeline for whole-slide-image and multimodal classification},
   author  = {Brunekreef, Joren and {AI for Oncology, The Netherlands Cancer Institute}},
   year    = {2026},
-  version = {0.1.0},
+  version = {0.2.0},
   license = {Apache-2.0},
   url     = {https://github.com/NKI-AI/dlux}
 }

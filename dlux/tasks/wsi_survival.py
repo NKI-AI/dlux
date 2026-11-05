@@ -11,13 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""WSISurvivalTask, a time-to-event patient endpoint from one precomputed slide-feature set (ABMIL).
+"""WSISurvivalTask, a time-to-event patient endpoint from the declared input streams.
 
 Reads two patient columns (an event indicator and a follow-up time) and models them with the
-discrete-time hazard formulation (see ``dlux.tasks.survival``): the ABMIL head emits one hazard logit
-per time bin, the loss is the discrete-time NLL, and the streamed metric is Harrell's C-index. The
+discrete-time hazard formulation (see ``dlux.tasks.survival``): the configured model emits one hazard
+logit per time bin, the loss is the discrete-time NLL, and the streamed metric is Harrell's C-index. The
 bin edges are the fold's fit-split quantiles (resolved in ``build_task``, leakage-clean) so time is
-discretised identically for every patient. H&E-only.
+discretised identically for every patient.
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ from ahcore.tasks.interfaces import TaskWithMetrics
 
 from dlux.config.cohort import ContractField, Objective, SplitCategory
 from dlux.modalities import PatientField
+from dlux.tasks.fit_state import FitState
 from dlux.tasks.survival import build_survival_metrics, survival_nll, survival_risk
 
 
@@ -43,7 +44,7 @@ def _as_float(value: Any) -> float:
 
 
 class WSISurvivalTask(ConcreteTaskWithAdapters, TaskWithMetrics):
-    """Time-to-event patient endpoint from one precomputed slide-feature set (ABMIL, discrete-time NLL)."""
+    """Time-to-event patient endpoint from the declared input streams (discrete-time NLL)."""
 
     name = "wsi_survival"
 
@@ -62,9 +63,9 @@ class WSISurvivalTask(ConcreteTaskWithAdapters, TaskWithMetrics):
             raise ValueError(
                 f"WSISurvivalTask handles the survival objective only, got '{contract_field.objective.value}'."
             )
-        self._target = target
         self._event_col = contract_field.source.column
         self._time_col = contract_field.source.time_column
+        assert self._event_col is not None and self._time_col is not None
         self._event_key = f"patient.{self._event_col}"
         self._time_key = f"patient.{self._time_col}"
         self._n_bins = int(n_bins)
@@ -144,10 +145,8 @@ class WSISurvivalTask(ConcreteTaskWithAdapters, TaskWithMetrics):
         """Model head output dim = the number of discrete-time hazard bins."""
         return self._n_bins
 
-    @property
-    def time_edges(self) -> np.ndarray | None:
-        """This fold's interior bin edges (``n_bins - 1`` cut points, in the time column's units), or
-        None for the inference-only construction. Public because the per-bin hazard logits are
-        meaningless without them: every fold quantiles its own fit split, so bin j spans a different
-        interval in each. Persisted alongside the predictions."""
-        return None if self._edges is None else self._edges.numpy()
+    def fit_state(self) -> FitState:
+        """``time_edges`` are this fold's interior bin edges (``n_bins - 1`` cut points, in the time column's
+        units), or None for the inference-only construction. The per-bin hazard logits are meaningless
+        without them: every fold quantiles its own fit split, so bin j spans a different interval in each."""
+        return FitState(time_edges=None if self._edges is None else self._edges.numpy())

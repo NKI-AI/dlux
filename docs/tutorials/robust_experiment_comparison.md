@@ -22,7 +22,7 @@ You see both outcomes side by side. One arm shows a difference that stays within
 
 Each arm is its own experiment recipe, a file under `catalog/experiment/tcga_subtyping/`. Give every arm you compare its own file. The file records what the arm was, and the comparison reads the arms back by name, which keeps the whole comparison reproducible.
 
-`baseline.yaml` already exists from the tutorial. Add two more beside it.
+The example ships all three arms in `examples/catalog/experiment/tcga_subtyping/`: `baseline.yaml` from the tutorial, and the two below. For your own comparison you write such files yourself.
 
 `catalog/experiment/tcga_subtyping/meanmil.yaml`:
 
@@ -30,9 +30,9 @@ Each arm is its own experiment recipe, a file under `catalog/experiment/tcga_sub
 # @package _global_
 defaults:
   - override /task: wsi_classification
+  - override /feature_extractor: phikon_tile
   - override /lit_module: mean_mil
 experiment_name: meanmil
-task_name: wsi_classification
 datamodule:
   batch_size: 4
 trainer:
@@ -45,8 +45,8 @@ trainer:
 # @package _global_
 defaults:
   - override /task: wsi_classification
+  - override /feature_extractor: phikon_tile
 experiment_name: lr_starved
-task_name: wsi_classification
 datamodule:
   batch_size: 4
 trainer:
@@ -60,7 +60,7 @@ Each differs from the baseline in exactly one place. `meanmil` swaps the model. 
 
 ## Step 2. Name the comparison
 
-One file names the arms and the reference. Both comparison stages below read it, so the question is stated once.
+One file names the arms and the reference. Both comparison stages below read it, so the question is stated once. The example ships it too.
 
 `catalog/comparison/tcga_subtyping/robustness.yaml`:
 
@@ -82,7 +82,7 @@ for exp in meanmil lr_starved; do
   for fold in 0 1 2 3 4 5; do
     python bin/train.py \
       study=tcga_subtyping cohort=tcga_brca_coad_christiana \
-      experiment=tcga_subtyping/$exp feature_extractor=phikon_tile \
+      experiment=tcga_subtyping/$exp \
       task.target.field=cancer_type fold=$fold
   done
   python bin/aggregate.py study=tcga_subtyping cohort=tcga_brca_coad_christiana experiment_name=$exp
@@ -100,7 +100,7 @@ python bin/compare.py study=tcga_subtyping cohort=tcga_brca_coad_christiana \
   comparison=tcga_subtyping/robustness
 ```
 
-It writes each arm's pooled metric, the paired per-outer-fold delta against the baseline, and each arm's patient coverage to `studies/tcga_subtyping/comparisons/robustness/`. Open `summary.md` there to read it. It also renders `metric.png` (each arm's per-fold metric) and `deltas.png` (the per-fold deltas against the baseline), with the raw numbers in `per_fold.csv`. No model is retrained. It only reads.
+It writes each arm's pooled metric, the paired per-outer-fold delta against the baseline, and each arm's patient coverage to `studies/tcga_subtyping/comparisons/robustness/nested_cv/`. Open `summary.md` there to read it. It also renders `metric.png` (each arm's per-fold metric) and `deltas.png` (the per-fold deltas against the baseline), with the raw numbers in `per_fold.csv`. No model is retrained. It only reads.
 
 The two inner folds are ensembled into one prediction per patient, so the delta is one number per outer fold. In this 3-outer 2-inner nested-cv setup, that produces three numbers. These numbers are merely suggestive of the existence of a performance difference. Three outer folds that share training data are too few and too correlated to support a significance test, so `compare` runs none. A delta that looks large here is a reason to run the resplit sweep. That is what the rest of the tutorial does.
 
@@ -121,7 +121,7 @@ for exp in baseline meanmil lr_starved; do
     for rep in 0 1 2; do
       python bin/train_resplit.py \
         study=tcga_subtyping cohort=tcga_brca_coad_christiana \
-        experiment=tcga_subtyping/$exp feature_extractor=phikon_tile \
+        experiment=tcga_subtyping/$exp \
         task.target.field=cancer_type \
         resplit_name=robustness seed=$seed rep=$rep
     done
@@ -129,7 +129,7 @@ for exp in baseline meanmil lr_starved; do
 done
 ```
 
-`feature_extractor=phikon_tile` is passed for the same reason the tutorial passes it. The built-in default points at a different encoder, and the trials must read the Phikon cache you already built. That is 3 arms by 10 seeds by 3 replicates, so 90 short trainings. On the 15-per-class tutorial data each one is quick, and the whole sweep runs on one machine. The trials are fully independent, so on a cluster you submit them as array jobs instead of a loop, one task per `(seed, rep)`. More seeds sharpen the floor. Ten is enough to see the shape. You can rerun the loop with a larger `SEEDS` later, and the trials already done are skipped.
+Each experiment selects the Phikon encoder itself, so the trials read the Phikon cache you already built. That is 3 arms by 10 seeds by 3 replicates, so 90 short trainings. On the 15-per-class tutorial data each one is quick, and the whole sweep runs on one machine. The trials are fully independent, so on a cluster you submit them as array jobs instead of a loop, one task per `(seed, rep)`. More seeds sharpen the floor. Ten is enough to see the shape. You can rerun the loop with a larger `SEEDS` later, and the trials already done are skipped.
 
 ## Step 6. Compare against the noise floor
 
@@ -138,8 +138,7 @@ done
 ```bash
 python bin/compare_resplits.py \
   study=tcga_subtyping cohort=tcga_brca_coad_christiana \
-  comparison=tcga_subtyping/robustness resplit_name=robustness \
-  task.target.field=cancer_type
+  comparison=tcga_subtyping/robustness resplit_name=robustness
 ```
 
 For each arm the report gives:
@@ -151,7 +150,7 @@ For each arm the report gives:
 
 ## Read the results
 
-The report lands under `studies/tcga_subtyping/resplits/robustness/tcga_brca_coad_christiana/results/robustness/cancer_type/`. Open `summary.md`; it embeds three figures. `clouds.png` is the one to read first: each arm's delta cloud against the noise floor. `metric.png` is each arm's absolute AUROC, and `margin_convergence.png` shows how the floor settles as seeds accumulate. The per-seed numbers behind them are in `per_seed.csv`.
+The report lands under `studies/tcga_subtyping/comparisons/robustness/resplit_robustness/cancer_type/`, beside the `nested_cv/` report of step 4. Open `summary.md`; it embeds three figures. `clouds.png` is the one to read first: each arm's delta cloud against the noise floor. `metric.png` is each arm's absolute AUROC, and `margin_convergence.png` shows how the floor settles as seeds accumulate. The per-seed numbers behind them are in `per_seed.csv`.
 
 Read it as an answer to one question. Does the arm's effect stand outside its noise floor? For **meanmil** on this task we expect it does not. The effect sits inside the floor. Because the task is near ceiling, that often shows up as deltas of exactly zero across every seed rather than a small wobble, since most splits score a perfect AUROC for either arm. Any difference here stays within the noise, which shows attention is not needed. It stops short of the stronger claim that meanmil matches the baseline exactly. For **lr_starved** we expect a clear drop that clears the floor in most splits, a difference the noise cannot explain away.
 

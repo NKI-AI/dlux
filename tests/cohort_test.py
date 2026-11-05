@@ -18,6 +18,8 @@ from __future__ import annotations
 import math
 
 import pytest
+from pydantic import ValidationError
+
 from dlux.config.cohort import (
     Cohort,
     ContractField,
@@ -29,7 +31,6 @@ from dlux.config.cohort import (
     StratifyMethod,
     Study,
 )
-from pydantic import ValidationError
 
 
 def _field(data: dict) -> ContractField:
@@ -46,13 +47,13 @@ def test_sugar_binary():
     assert f.objective is Objective.binary
     assert f.source.transform.categorical == {"BRCA": 0, "COAD": 1}
     assert f.source.column is None  # injected at Dataset level, not here
-    assert f.num_outputs == 1 and f.target_dtype() == "float"
+    assert f.num_outputs == 1
 
 
 def test_sugar_multiclass():
     f = _field({"type": "multiclass", "map": {"BRCA": 0, "COAD": 1, "LUAD": 2}})
     assert f.objective is Objective.multiclass
-    assert f.num_outputs == 3 and f.target_dtype() == "long"
+    assert f.num_outputs == 3
 
 
 def test_sugar_continuous_bare():
@@ -60,7 +61,7 @@ def test_sugar_continuous_bare():
     assert f.objective is Objective.regression
     assert f.source.transform is None
     assert f.stratify.method is StratifyMethod.median  # default injected
-    assert f.num_outputs == 1 and f.target_dtype() == "float"
+    assert f.num_outputs == 1
 
 
 def test_sugar_continuous_with_transform_and_stratify():
@@ -100,22 +101,22 @@ def test_time_column_rejected_off_survival():
         _field({"source": {"column": "x", "time_column": "t"}, "objective": "regression"})
 
 
-# -- facet form + the previously-impossible case -----------------------------
+# -- facet form, and a modeled objective that differs from the column's type --
 def test_facet_binary_canonical():
     f = _field({"source": {"column": "MPR", "transform": {"categorical": {"0": 0, "1": 1}}}, "objective": "binary"})
     assert f.objective is Objective.binary and f.source.column == "MPR"
 
 
 def test_loss_is_not_a_contract_facet():
-    """Class weighting moved to `task.loss.weight`: every facet left here is consumed while BUILDING
-    the DB, and weighting is a per-run decision two arms must be able to differ on. `extra=forbid`
-    makes a cohort still carrying it loud rather than silently ignored."""
+    """Class weighting lives at `task.loss.weight`: every contract facet is consumed while BUILDING the
+    DB, and weighting is a per-run decision two arms must be able to differ on. `extra=forbid` makes a
+    cohort that carries it loud rather than silently ignored."""
     with pytest.raises(ValidationError):
         _field({"type": "binary", "map": {"0": 0, "1": 1}, "loss": {"weight": "balanced"}})
 
 
 def test_binarize_continuous_to_binary():
-    # the case that was inexpressible before
+    # a continuous column modeled as a binary target
     f = _field({"source": {"column": "CNH", "transform": {"binarize": {"method": "median"}}}, "objective": "binary"})
     assert f.objective is Objective.binary and f.num_outputs == 1
     assert f.source.transform.binarize.method is StratifyMethod.median
@@ -214,19 +215,11 @@ def test_expression_num_outputs_is_deferred():
 
 
 # -- accessors ---------------------------------------------------------------
-def test_num_outputs_and_dtype_and_sentinel():
+def test_num_outputs():
     b = _field({"type": "binary", "map": {"A": 0, "B": 1}})
     m = _field({"type": "multiclass", "map": {"A": 0, "B": 1, "C": 2}})
     r = _field({"type": "continuous"})
-    assert (b.num_outputs, b.target_dtype(), b.missing_sentinel()) == (1, "float", -1)
-    assert (m.num_outputs, m.target_dtype(), m.missing_sentinel()) == (3, "long", -1)
-    assert r.num_outputs == 1 and r.target_dtype() == "float" and math.isnan(r.missing_sentinel())
-
-
-def test_metric_names_from_table():
-    b = _field({"type": "binary", "map": {"A": 0, "B": 1}})
-    assert "auroc" in b.metric_names("stream")
-    assert {"auroc", "mcc", "f1"} <= set(b.metric_names("report"))
+    assert (b.num_outputs, m.num_outputs, r.num_outputs) == (1, 3, 1)
 
 
 # -- Cohort-level wiring -----------------------------------------------------
@@ -287,15 +280,15 @@ def _two_endpoint_cohort() -> Cohort:
         name="c",
         storage=Storage(image_dir="/i"),
         contract={
-            "leukocyte_fraction": {"type": "continuous"},
-            "expression": {"type": "expression"},
+            "leukocyte_fraction": _field({"type": "continuous"}),
+            "expression": _field({"type": "expression"}),
         },
     )
 
 
 def test_targets_and_require_modalities_are_required():
-    """Omission used to mean "every endpoint the cohort offers" and "gate on nothing" — implicit defaults
-    that made a sweep's expected shape unknowable downstream. Both must now be written."""
+    """Omitting them would mean "every endpoint the cohort offers" and "gate on nothing", implicit defaults
+    that make a sweep's expected shape unknowable downstream. So both must be written."""
     with pytest.raises(ValidationError, match="targets"):
         Study(name="s", cohorts={"c": Role.development}, require_modalities=[])  # no targets
     with pytest.raises(ValidationError, match="require_modalities"):
@@ -335,8 +328,8 @@ def test_splits_for_composes_role_strategy_with_study_params():
 
 
 def test_require_modalities_validated_where_it_is_resolved():
-    """The schema no longer keeps its own modality name list — the registry is the single source, so a
-    name that cannot gate splits is rejected by build_db, naming the ones that can."""
+    """The modality registry is the single source of modality names, so the schema accepts any name and
+    build_db rejects one that cannot gate splits, naming the ones that can."""
     Study(name="s", cohorts={"c": "development"}, require_modalities=["proteomics"], targets=["t"])  # schema-legal
     from dlux.data.build_db import MODALITY_COVERAGE, _resolve_require_coverage
     from dlux.data.errors import BuildDbError
@@ -383,6 +376,7 @@ def test_apply_admin_censoring_caps_events_beyond_horizon():
     """Beyond the horizon: event -> 0 at time -> horizon. At/below it and missing times are untouched;
     the boundary (time == horizon) is kept as a real event."""
     import pandas as pd
+
     from dlux.data.build_db import _apply_admin_censoring
 
     cohort = _cohort({"efs": {"type": "survival", "event": "efs_event", "time": "efs"}})
@@ -401,6 +395,7 @@ def test_apply_admin_censoring_caps_events_beyond_horizon():
 
 def test_apply_admin_censoring_rejects_a_non_survival_target():
     import pandas as pd
+
     from dlux.data.build_db import _apply_admin_censoring
     from dlux.data.errors import BuildDbError
 

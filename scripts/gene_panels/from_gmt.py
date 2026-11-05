@@ -15,7 +15,7 @@
 
 Reads a GMT (one gene set per line), unions the chosen set(s), maps to Entrez if the GMT holds
 symbols, intersects with the cohort's RNA matrix, and writes a frozen panel (``panels/<name>.csv``)
-usable via ``task.gene_panel=<name>`` — the same artifact as an HVG panel. The GMT is an external
+usable via ``task.target.gene_panel=<name>`` — the same artifact as an HVG panel. The GMT is an external
 input (a path arg, downloaded from MSigDB), never copied into the repo.
 
     python scripts/gene_panels/from_gmt.py \

@@ -13,15 +13,12 @@
 # limitations under the License.
 """WSIClassificationTask, the common case.
 
-Patient-level **binary or multiclass** classification from one precomputed
-slide-feature set, aggregated per slide with attention-MIL (ABMIL). Deliberately
-narrow: a single ``CachedSlideFeaturesAdapter`` feeding an ABMIL head; the target
-is a patient label mapped via the dataset contract (raw value -> class index,
-`-1` for missing/out-of-map, excluded from loss + metrics).
+Patient-level binary or multiclass classification from the declared input streams, fed to the
+configured model. The target is a patient label mapped via the dataset contract (raw value -> class
+index, `-1` for missing/out-of-map, excluded from loss + metrics).
 
-This is a template, not a cage. Fusion / regression / survival are separate task
-classes; for anything more exotic, write a custom ``Task`` against the ahcore
-Task protocol, it plugs into the same LightningModule and datamodule.
+Regression, survival and bulk RNA are separate task classes. For other endpoints, write a custom
+``Task`` against the ahcore Task protocol. It plugs into the same LightningModule and datamodule.
 """
 
 from __future__ import annotations
@@ -43,11 +40,12 @@ from dlux.tasks.classification import (
     classification_loss,
     classification_metric_tensors,
 )
+from dlux.tasks.fit_state import FitState
 from dlux.tasks.target import build_field_transform
 
 
 class WSIClassificationTask(ConcreteTaskWithAdapters, TaskWithMetrics):
-    """Binary/multiclass patient endpoint from one precomputed slide-feature set (ABMIL)."""
+    """Binary/multiclass patient endpoint from the declared input streams."""
 
     name = "wsi_classification"
 
@@ -67,13 +65,14 @@ class WSIClassificationTask(ConcreteTaskWithAdapters, TaskWithMetrics):
                 f"WSIClassificationTask handles binary/multiclass objectives only, "
                 f"got '{contract_field.objective.value}' — use the appropriate task for that objective."
             )
-        self._target = target
         self._is_binary = contract_field.objective == Objective.binary
         self._num_classes = contract_field.num_outputs  # 1 (binary) or K (multiclass)
         # Labels are stored under the sheet column, which is the endpoint name only when the contract
         # does not redirect it. `leukocyte_high` sourcing `leukocyte_fraction` is the case that separates
-        # them; wsi_survival has always keyed on source.column for the same reason.
-        self._label_column = contract_field.source.column
+        # them. wsi_survival keys on source.column for the same reason.
+        # Cohort injects the contract key as the column of a field that does not name one, and
+        # `target` is that key, so the same rule applies to a field built on its own.
+        self._label_column = contract_field.source.column or target
         self._label_key = f"patient.{self._label_column}"
         # raw -> class idx via the single target-transform seam (categorical -> LabelMapping, -1 for out-of-map)
         self._label_mapping = build_field_transform(contract_field, target_stats)
@@ -92,16 +91,13 @@ class WSIClassificationTask(ConcreteTaskWithAdapters, TaskWithMetrics):
         anything that must visit all of them regardless of role (e.g. persisting fit-derived state)."""
         return self._streams
 
-    # The resolved weighting, exposed so the run can record what it actually trained with. Under
-    # `balanced` these come from this fold's fit split, so they are fold-specific fit-derived state
-    # like the regression target's mean/std, and belong in the run's metadata for the same reason.
-    @property
-    def pos_weight(self) -> Optional[float]:
-        return self._pos_weight
-
+    # The resolved class weighting, for a subclass that brings its own loss (see ``compute_loss``).
     @property
     def class_weights(self) -> Optional[Sequence[float]]:
         return self._class_weights
+
+    def fit_state(self) -> FitState:
+        return FitState(pos_weight=self._pos_weight, class_weights=self._class_weights)
 
     # -- batching -------------------------------------------------------------
     def collate_policies(self) -> Dict[str, ShapePolicy]:
@@ -148,5 +144,5 @@ class WSIClassificationTask(ConcreteTaskWithAdapters, TaskWithMetrics):
 
     @property
     def num_classes(self) -> int:
-        """Model head output dim (1 binary / K multiclass), the ABMIL config must match this."""
+        """Model head output dim (1 binary / K multiclass), the model config must match this."""
         return self._num_classes

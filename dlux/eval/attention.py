@@ -39,6 +39,12 @@ LENGTH_KEY = "length"
 SLIDE_ID_KEY = "slide_id"
 
 
+def raw_attention_logits(module: nn.Module, features: torch.Tensor) -> torch.Tensor:
+    """The encoder's raw attention logits, read through the accessor ``find_attention_module`` checked for."""
+    accessor = getattr(module, _ACCESSOR)
+    return accessor(features)
+
+
 def find_attention_module(lit_module: nn.Module) -> nn.Module | None:
     """Returns the model's declared ``attention_encoder``, or None if it has no attention branch.
 
@@ -133,9 +139,3 @@ def write_attention_npz(
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(path, **payload)
     return path
-
-
-def read_attention_npz(path: Path) -> dict[str, np.ndarray]:
-    """Returns ``slide_id -> (n_tiles, 3)``, the inverse of :func:`write_attention_npz`."""
-    with np.load(path, allow_pickle=True) as handle:
-        return {key[len("slide/") :]: handle[key] for key in handle.files if key.startswith("slide/")}

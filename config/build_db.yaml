@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  # Both REQUIRED and cross-checked. study = which experiment (assigns each cohort a role → split
+  # Both REQUIRED and cross-checked. study = which study (assigns each cohort a role → split
   # strategy); cohort = which of its cohorts to build, one run per cohort.
   - study: ???
   - cohort: ???
@@ -12,15 +12,15 @@ defaults:
   - optional local/misc: default
 hydra:
   # A consumer project supplies its own `catalog/` (cohorts, studies, experiments) and `config/`
-  # (custom tasks/models + its cohort paths). Both are search-path roots. Paths are relative to the
-  # process working directory (the repo root); set
-  # DLUX_PROJECT to a consumer project root (it supplies catalog/ and config/).
+  # (custom tasks/models + its cohort paths). Both are search-path roots. DLUX_PROJECT names the
+  # project; `dlux.project` resolves a relative value from the repository root and fails if either
+  # root is missing.
   searchpath:
-    - file://${oc.env:DLUX_PROJECT,.}/catalog
-    - file://${oc.env:DLUX_PROJECT,.}/config
+    - file://${dlux.project:}/catalog
+    - file://${dlux.project:}/config
   run:
-    dir: ${paths.log_dir}/build_db/${study.name}/${cohort.name}/${now:%Y-%m-%d}_${now:%H-%M-%S-%f}
-# The rigid input sheets (see dlux_notes/SHEET_SPEC.md). Default to the cohort's canonical
+    dir: ${paths.log_dir}/${study.name}/build_db/${cohort.name}/${now:%Y-%m-%d}_${now:%H-%M-%S-%f}
+# The rigid input sheets (see docs/specs/SHEET_SPEC.md). Default to the cohort's canonical
 # layout-A location; override only if the sheets live elsewhere.
 patients_csv: ${paths.cohorts_dir}/${cohort.name}/sheets/patients.csv
 slides_csv: ${paths.cohorts_dir}/${cohort.name}/sheets/slides.csv
@@ -37,7 +37,7 @@ probe_grid:
   tile_overlap: [0, 0]
   mask_threshold: 0.0
 # Predefined CV splits (see docs/specs/SPLITS_SPEC.md). By default build_db draws the split;
-# set import_from to a patient->fold CSV (the `<cohort>_splits.csv` build_db always emits) to write that
+# set import_from to a patient->fold CSV (the `splits.csv` build_db always emits) to write that
 # assignment verbatim instead — so two cohorts share identical folds. allow_uncovered permits the file to
 # cover only a subset of this cohort's labelled patients (the matched cross-cohort intersection case);
 # left false, a labelled patient missing from the import is an error.
@@ -48,5 +48,5 @@ splits:
 # to remove-and-rebuild.
 overwrite: false
 # Auto-generate the dataset analysis (summary.md + figures) after creation, into
-# <studies_dir>/<study>/<cohort>_analysis/. Set false to skip; rebuild the DB to regenerate.
+# <studies_dir>/<study>/db/<cohort>/analysis/. Set false to skip; rebuild the DB to regenerate.
 analyze: true

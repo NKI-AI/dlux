@@ -17,6 +17,7 @@ justified by, and the rendered summary."""
 from __future__ import annotations
 
 import pytest
+
 from dlux.data.analyze_features import (
     cost_ladder,
     experiment_snippet,

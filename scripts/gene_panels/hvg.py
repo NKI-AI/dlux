@@ -15,7 +15,7 @@
 
 Computes each gene's variance of log1p expression across ALL cohort patients, takes the top-N, and
 writes a frozen Entrez gene-list (``panels/hvg<N>.csv``) that the expression task can select via
-``task.gene_panel=hvg<N>``. Panel selection is unsupervised (target variance only, no predictions),
+``task.target.gene_panel=hvg<N>``. Panel selection is unsupervised (target variance only, no predictions),
 computed once on the full cohort so the panel is fold-invariant.
 
     python scripts/gene_panels/hvg.py --matrix .../rnaseq/matrix.parquet --n 2000

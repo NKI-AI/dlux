@@ -1,0 +1,12 @@
+_target_: ahcore.mm_lit_module.MultiModalLightningModule
+model:
+  _target_: dlux.models.tile_cnn.TileCNN
+  input_key: tiles # = the task's tile input name
+  num_classes: 1 # overridden per-endpoint by the train bin (task.num_classes)
+  weights: imagenet # null = random init, "imagenet" = torchvision ResNet18 weights, or a local .pth path
+  freeze_through: null # a backbone stage (conv1 ... layer4): freeze up to and including it
+optimizer:
+  _target_: torch.optim.AdamW
+  _partial_: true
+  lr: 1.0e-4
+  weight_decay: 0.0

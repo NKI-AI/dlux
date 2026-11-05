@@ -20,11 +20,12 @@ import json
 
 import numpy as np
 import pytest
+
 from dlux.eval.aggregate import aggregate_experiment, write_reports
 from dlux.eval.predictions import write_predictions_npz
 
 # Fractional targets in [0,1) on purpose: an int64 cast anywhere in the read/roll path would
-# truncate them all to 0 (the leukocyte-fraction bug), which these tests must catch.
+# truncate them all to 0, which these tests must catch.
 _REG_LABELS = {"p0": 0.10, "p1": 0.40, "p2": 0.20, "p3": 0.80}
 
 
@@ -47,7 +48,9 @@ def _write_regression_fold(runs_root, outer, inner, preds):
         },
         d / "test_predictions.npz",
     )
-    (d / "metadata.json").write_text(json.dumps({"n_outer": 2, "n_inner": 1}))
+    (d / "metadata.json").write_text(
+        json.dumps({"n_outer": 2, "n_inner": 1, "test_coverage": {"declared": 0, "scored": 0, "lost": []}})
+    )
 
 
 def test_regression_aggregate(tmp_path):

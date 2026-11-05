@@ -7,4 +7,5 @@ hf_filename: tissue_background_all_stains.pack
 pack_path: null # explicit local .pack; null -> download from HF (cached)
 device: auto # auto -> the GPU backend when available (torch.accelerator), else cpu
 thumbnail: false # set true to also write a <stem>.thumbnail.png QC overlay (mask over a low-res slide read)
+slide_workers: null # slides segmented concurrently; null -> 12 for a remote cohort, 1 for a local one
 quiet_reader: true # silence fastslide's C++ corrupt-tile (DATA_LOSS) stderr chatter; set false to debug

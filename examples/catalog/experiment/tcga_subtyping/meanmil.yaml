@@ -3,9 +3,9 @@
 # so an arm-vs-baseline comparison isolates what the attention branch contributes.
 defaults:
   - override /task: wsi_classification
+  - override /feature_extractor: phikon_tile
   - override /lit_module: mean_mil
 experiment_name: meanmil
-task_name: wsi_classification
 datamodule:
   batch_size: 4
 trainer:

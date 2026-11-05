@@ -13,11 +13,10 @@
 # limitations under the License.
 """The single raw -> modeled-target seam (fed to the PatientLabelAdapter).
 
-All target transforms (``categorical`` / ``binarize`` / ``numeric``) are applied through the
-*same* mechanism the categorical path already uses (the adapter's field-transform), constructed
-here from the contract field (+ build-db-resolved statistics for binarize/numeric). This is where
-the objective-aware missing sentinel is also housed, so there is exactly one place a raw value
-becomes a modeled label. See ``docs/specs/CONTRACT_SPEC.md`` ("Transform statistics").
+All target transforms (``categorical`` / ``binarize`` / ``discretize`` / ``numeric``) are applied through the
+adapter's field-transform, constructed here from the contract field (+ build-db-resolved
+statistics for binarize/discretize). This is where the objective-aware missing sentinel is also housed,
+so there is exactly one place a raw value becomes a modeled label. See ``docs/specs/CONTRACT_SPEC.md`` §1.5.
 """
 
 from __future__ import annotations
@@ -28,10 +27,10 @@ import math
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from ahcore.data.adapters.patient_label import PatientLabelAdapter
+
 from dlux.config.cohort import ContractField, Objective
 from dlux.tasks.classification import EXCLUDED, LabelMapping
-
-STATS_SUFFIX = "_contract_stats.json"
 
 
 def load_target_stats(stats_path: Path, field_name: str) -> Optional[dict]:
@@ -39,14 +38,14 @@ def load_target_stats(stats_path: Path, field_name: str) -> Optional[dict]:
 
     Written by ``build_db`` next to the study's DB. Absent file and absent entry are the same answer:
     this endpoint carries no fold-invariant statistic. A transform that needs one says so itself when
-    it is handed None."""
+    it is handed None. A file that exists but cannot be read or parsed raises."""
     path = Path(stats_path)
     if not path.exists():
         return None
     try:
         return json.loads(path.read_text()).get(field_name)
-    except (OSError, json.JSONDecodeError):
-        return None
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Cannot read the target statistics in {path}: {exc}") from exc
 
 
 def _to_float_or_nan(value: Any) -> float:
@@ -59,8 +58,8 @@ def _to_float_or_nan(value: Any) -> float:
 def _binarizer(threshold: float) -> Callable[[Any], int]:
     """Continuous raw value -> {0, 1} at a cohort-wide cut; unparseable/NaN -> the categorical sentinel.
 
-    ``>=`` puts the cut point itself in the positive class. Arbitrary but fixed: the alternative
-    silently moves one patient per tied value between arms."""
+    ``>=`` puts the cut point itself in the positive class. The rule is fixed, so a tied value falls
+    in the same class in every arm."""
 
     def apply(value: Any) -> int:
         parsed = _to_float_or_nan(value)
@@ -86,12 +85,12 @@ def _discretizer(edges: list[float]) -> Callable[[Any], int]:
     return apply
 
 
-def build_field_transform(field: ContractField, resolved_stats: Optional[dict] = None) -> Callable[[Any], Any]:
+def build_field_transform(field: ContractField, resolved_stats: Optional[dict] = None) -> PatientLabelAdapter.Transform:
     """Return the raw -> modeled-target callable for ``field``.
 
-    ``resolved_stats`` is this endpoint's entry from the study's ``*_contract_stats.json``, resolved
-    once at build-db over the cohort's valid-value patients. Only ``binarize`` needs it: the cut must
-    be identical in every fold, or the ground truth itself would move between folds.
+    ``resolved_stats`` is this endpoint's entry from the cohort's ``contract_stats.json``, resolved
+    once at build-db over the cohort's valid-value patients. Only ``binarize`` and ``discretize`` need it: the
+    cuts must be identical in every fold, or the ground truth itself would move between folds.
     """
     transform = field.source.transform
     if transform is not None and transform.categorical is not None:
@@ -99,15 +98,15 @@ def build_field_transform(field: ContractField, resolved_stats: Optional[dict] =
     if transform is not None and transform.binarize is not None:
         if not resolved_stats or "threshold" not in resolved_stats:
             raise ValueError(
-                f"binarize target needs its build-db-resolved threshold, and none was recorded. "
-                f"Rebuild the study's DB so {STATS_SUFFIX.lstrip('_')} carries it."
+                "binarize target needs its build-db-resolved threshold, and none was recorded. "
+                "Rebuild the study's DB so its contract_stats.json carries it."
             )
         return _binarizer(float(resolved_stats["threshold"]))
     if transform is not None and transform.discretize is not None:
         if not resolved_stats or "edges" not in resolved_stats:
             raise ValueError(
                 "discretize target needs its build-db-resolved edges, and none was recorded. "
-                f"Rebuild the study's DB so {STATS_SUFFIX.lstrip('_')} carries it."
+                "Rebuild the study's DB so its contract_stats.json carries it."
             )
         return _discretizer(resolved_stats["edges"])
     if transform is not None and transform.numeric == "log1p":

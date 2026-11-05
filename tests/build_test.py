@@ -22,15 +22,19 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from dlux.config.cohort import ContractField, Objective
+from hydra.utils import get_class
+from omegaconf import OmegaConf
+from pydantic import ValidationError
+
+from dlux.config.cohort import Cohort, ContractField, Objective, Splits, SplitStrategy, Storage
+from dlux.data import layout
+from dlux.data.build_db import build_db
 from dlux.tasks import build
+from dlux.tasks.tile_classification import TileClassificationTask
 from dlux.tasks.wsi_bulk_rna import WSIBulkRNATask
 from dlux.tasks.wsi_classification import WSIClassificationTask
 from dlux.tasks.wsi_regression import WSIRegressionTask
 from dlux.tasks.wsi_survival import WSISurvivalTask
-from hydra.utils import get_class
-from omegaconf import OmegaConf
-from pydantic import ValidationError
 
 # Sentinels returned by the monkeypatched fit helpers (so extras values are identifiable).
 _GENE_IDS = ["g0", "g1"]
@@ -64,7 +68,6 @@ def _extras(objective, target_normalize="none", weight="none"):
         manifest_name="c",
         contract_field=ContractField.model_validate(_FIELDS[objective]),
         loss_weight=weight,
-        target="t",
         target_normalize=target_normalize,
         database_uri="db",
         split_version="v",
@@ -74,12 +77,12 @@ def _extras(objective, target_normalize="none", weight="none"):
 
 
 def _task_config_dir() -> Path:
-    """The shipped ``config/task`` dir, from the runfiles (see this target's ``data`` dep)."""
-    for base in (Path.cwd(), *Path.cwd().parents):
-        candidate = base / "aifo" / "dlux" / "config" / "task"
-        if candidate.is_dir():
-            return candidate
-    raise AssertionError(f"config/task not found in runfiles from {Path.cwd()}")
+    """The shipped ``config/task`` dir, next to ``tests/`` (under Bazel, the runfiles copy from this
+    target's ``data`` dep)."""
+    candidate = Path(__file__).parents[1] / "config" / "task"
+    if not candidate.is_dir():
+        raise AssertionError(f"config/task not found at {candidate}")
+    return candidate
 
 
 def test_every_shipped_task_config_declares_a_resolvable_target():
@@ -89,6 +92,7 @@ def test_every_shipped_task_config_declares_a_resolvable_target():
     assert configs, "no task configs found"
     expected = {
         "wsi_classification": WSIClassificationTask,
+        "tile_classification": TileClassificationTask,
         "wsi_bulk_rna": WSIBulkRNATask,
         "wsi_regression": WSIRegressionTask,
         "wsi_survival": WSISurvivalTask,
@@ -110,8 +114,8 @@ def test_build_task_requires_a_target(monkeypatch):
 
 
 def test_task_class_rejects_a_mismatched_objective():
-    """The objective guard lives in each task class (it always did) — which is why the dispatch table
-    could go. A survival config pointed at a classification field must raise."""
+    """The objective guard lives in each task class, so no objective-to-task table is needed. A
+    classification task handed a survival field must raise."""
     with pytest.raises(ValueError, match="binary/multiclass"):
         WSIClassificationTask(
             target="x",
@@ -121,10 +125,20 @@ def test_task_class_rejects_a_mismatched_objective():
         )
 
 
+def test_the_tile_task_refuses_a_non_binary_endpoint():
+    with pytest.raises(ValueError, match="TileClassificationTask handles binary objectives only"):
+        TileClassificationTask(
+            target="x",
+            contract_field=ContractField.model_validate(_FIELDS[Objective.multiclass]),
+            inputs={},
+            data_description=None,
+        )
+
+
 def test_extras_are_target_side_only():
     """Fit-time extras belong to the ENDPOINT. An input stream resolves its own statistics in
     Modality.from_spec, so no combination of inputs changes what appears here."""
-    assert set(_extras(Objective.survival)) == {"time_edges", "n_bins"}
+    assert set(_extras(Objective.survival)) == {"time_edges"}
     assert set(_extras(Objective.regression)) == {"target_mean", "target_std"}
     assert set(_extras(Objective.regression_vector)) == _GENE_KEYS  # the expression TARGET's own stats
     assert set(_extras(Objective.binary)) == {"pos_weight", "class_weights"}
@@ -156,7 +170,7 @@ def test_loss_weighting_off_by_default():
 
 def test_loss_weighting_is_a_task_knob_not_a_contract_facet():
     """It is resolved from what the RUN asks for, so two arms on one cohort can differ. A contract
-    field carrying `loss:` is now rejected outright rather than quietly ignored."""
+    field carrying `loss:` is rejected rather than quietly ignored."""
     assert _extras(Objective.binary, weight="balanced")["pos_weight"] == pytest.approx(7.0)
     with pytest.raises(ValidationError):
         ContractField.model_validate({**_FIELDS[Objective.binary], "loss": {"weight": "balanced"}})
@@ -166,16 +180,25 @@ def test_manual_multiclass_weights_fill_omitted_classes():
     assert _extras(Objective.multiclass, weight={"0": 2.0, "2": 4.0})["class_weights"] == [2.0, 1.0, 4.0]
 
 
-def test_fuse_rna_is_rejected():
-    """The boolean is gone: a config still carrying it must say what replaced it."""
-    cfg = OmegaConf.create({"task": {"target": {"field": "x"}, "fuse_rna": True, "_target_": "x.Y"}})
+def test_an_unknown_task_key_is_refused():
+    """A key that neither task construction nor the task class reads would otherwise pass without effect."""
+    cfg = OmegaConf.create(
+        {
+            "task": {
+                "target": {"field": "x"},
+                "fuse_rna": True,
+                "_target_": "dlux.tasks.wsi_classification.WSIClassificationTask",
+            }
+        }
+    )
     field = ContractField.model_validate(_FIELDS[Objective.binary])
-    with pytest.raises(ValueError, match="inputs:"):
+    with pytest.raises(ValueError, match=r"unknown key\(s\) \['fuse_rna'\]"):
         build.build_task(cfg, None, field, None, None, "x_cv_o0_i0")
 
 
 def test_scalar_target_is_rejected():
-    """`target: os` became `target: {field: os}` — the old form must say so, not fail obscurely."""
+    """`target` is a block (`target: {field: os}`). A scalar `target: os` is refused with that form in the
+    message, not an obscure failure."""
     cfg = OmegaConf.create({"task": {"_target_": "dlux.tasks.wsi_survival.WSISurvivalTask", "target": "os"}})
     field = ContractField.model_validate(_FIELDS[Objective.binary])
     with pytest.raises(ValueError, match=r"target: \{field: os\}"):
@@ -184,58 +207,77 @@ def test_scalar_target_is_rejected():
 
 def test_survival_bins_and_edges():
     extras = _extras(Objective.survival)
-    assert extras["n_bins"] == 4
     assert np.allclose(extras["time_edges"], _EDGES)
 
 
-class _FakePatient:
-    def __init__(self, code):
-        self.patient_code = code
+class _ForkedTask:
+    def __init__(self, target, contract_field, data_description, inputs, target_stats=None, sigma=0.7):
+        self.sigma = sigma
 
 
-class _FakeDataManager:
-    """Enough of DataManager for ``_fit_records``: a manifest of five patients, of which a stored
-    split marks three as FIT."""
+def test_a_task_takes_its_own_options_from_the_task_config(monkeypatch):
+    monkeypatch.setattr(build, "get_class", lambda path: _ForkedTask)
+    task_cfg = OmegaConf.create({"_target_": "p.Forked", "target": {"field": "x"}, "loss": {}, "sigma": 0.5})
 
-    ALL = ["p0", "p1", "p2", "p3", "p4"]
-    STORED_FIT = ["p0", "p2", "p4"]
+    task = build.construct_task(
+        task_cfg,
+        target="x",
+        contract_field=None,
+        data_description=None,
+        inputs={},
+        target_stats=None,
+        fit_extras={},
+    )
 
-    def __init__(self, database_uri):
-        self.database_uri = database_uri
+    assert task.sigma == 0.5
+    with pytest.raises(ValueError, match=r"unknown key\(s\) \['sigam'\]"):
+        build.task_class_and_options(OmegaConf.create({"_target_": "p.Forked", "sigam": 0.5}))
 
-    def get_all_records(self, manifest_name):
-        return (_FakePatient(c) for c in self.ALL)
 
-    def get_records_by_split(self, manifest_name, split_version, split_category=None):
-        return (_FakePatient(c) for c in self.STORED_FIT)
+def _cohort_db(tmp_path: Path) -> tuple[str, str]:
+    """A real cohort DB from ``build_db``: 8 patients, a 2 x 2 nested CV on ``cancer_type``."""
+    codes = [f"brca{i}" for i in range(4)] + [f"coad{i}" for i in range(4)]
+    patients, slides = tmp_path / "patients.csv", tmp_path / "slides.csv"
+    patients.write_text("patient_id,cancer_type\n" + "".join(f"{c},{c[:4].upper()}\n" for c in codes))
+    slides.write_text("patient_id,image_path\n" + "".join(f"{c},{c}.svs\n" for c in codes))
+    contract = {"cancer_type": ContractField.model_validate({"type": "binary", "map": {"BRCA": 0, "COAD": 1}})}
+    db = tmp_path / "db"
+    build_db(
+        Cohort(name="c", storage=Storage(image_dir=str(tmp_path)), contract=contract),
+        Splits(strategy=SplitStrategy.nested_cv, n_outer=2, n_inner=2),
+        db,
+        patients_csv=patients,
+        slides_csv=slides,
+        probe="none",
+        analyze=False,
+    )
+    return f"sqlite:///{layout.manifest_db(db)}", "c"
 
 
 def _codes(records):
     return sorted(str(r.patient_code) for r in records)
 
 
-def test_fit_records_by_codes_matches_the_stored_split_for_the_same_patients(monkeypatch):
-    """The property the resplit lane rests on: naming the fit patients directly selects exactly what
-    the stored-split query would, so a statistic is unchanged by which route named the set."""
-    monkeypatch.setattr(build, "DataManager", _FakeDataManager)
-    stored = build._fit_records("uri", "m", "v_cv_o0_i0")
-    drawn = build._fit_records("uri", "m", None, _FakeDataManager.STORED_FIT)
-    assert _codes(stored) == _codes(drawn) == _FakeDataManager.STORED_FIT
+def test_fit_records_by_codes_matches_the_stored_split_for_the_same_patients(tmp_path):
+    """Naming the fit patients directly selects exactly what the stored-split query does, so a fit-time
+    statistic does not depend on which route named the set."""
+    uri, cohort = _cohort_db(tmp_path)
+    stored = _codes(build._fit_records(uri, cohort, "cancer_type_cv_o0_i0"))
+    assert 0 < len(stored) < 8
+    assert _codes(build._fit_records(uri, cohort, None, stored)) == stored
 
 
-def test_fit_records_by_codes_ignores_patients_outside_the_given_set(monkeypatch):
-    monkeypatch.setattr(build, "DataManager", _FakeDataManager)
-    assert _codes(build._fit_records("uri", "m", None, ["p1", "p3"])) == ["p1", "p3"]
+def test_fit_records_by_codes_ignores_patients_outside_the_given_set(tmp_path):
+    uri, cohort = _cohort_db(tmp_path)
+    assert _codes(build._fit_records(uri, cohort, None, ["brca1", "coad3", "absent"])) == ["brca1", "coad3"]
 
 
-def test_fit_records_rejects_both_ways_of_naming_the_fit_set(monkeypatch):
+def test_fit_records_rejects_both_ways_of_naming_the_fit_set():
     """Both given is ambiguous about which patients a leakage-sensitive statistic covered."""
-    monkeypatch.setattr(build, "DataManager", _FakeDataManager)
     with pytest.raises(ValueError, match="exactly one of split_version or fit_patient_codes"):
         build._fit_records("uri", "m", "v_cv_o0_i0", ["p0"])
 
 
-def test_fit_records_rejects_neither_way_of_naming_the_fit_set(monkeypatch):
-    monkeypatch.setattr(build, "DataManager", _FakeDataManager)
+def test_fit_records_rejects_neither_way_of_naming_the_fit_set():
     with pytest.raises(ValueError, match="exactly one of split_version or fit_patient_codes"):
         build._fit_records("uri", "m", None)

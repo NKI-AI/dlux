@@ -120,11 +120,12 @@ def validate_sheets(patients: pd.DataFrame, slides: pd.DataFrame, cohort: Cohort
     for field_name, field in cohort.contract.items():
         transform = field.source.transform
         if transform is not None and transform.categorical is not None:
-            column = field.source.column
-            present = set(patients[column].dropna().astype(str))
+            label_column = field.source.column
+            assert label_column is not None
+            present = set(patients[label_column].dropna().astype(str))
             unknown = present - set(transform.categorical)
             if unknown:
                 print(
-                    f"[validate] '{field_name}' (column '{column}'): {len(unknown)} value(s) not in map, "
+                    f"[validate] '{field_name}' (column '{label_column}'): {len(unknown)} value(s) not in map, "
                     f"excluded: {sorted(unknown)[:10]}"
                 )

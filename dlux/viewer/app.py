@@ -32,8 +32,9 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastslide.xyz_pyramid import XYZPyramid
 
-from dlux.eval.run_records import RunRecords
+from dlux.config.cohort import Objective
 from dlux.viewer.entries import SlideEntry
+from dlux.viewer.run_records import RunRecords
 
 _STATIC = Path(__file__).resolve().parent / "static"
 
@@ -126,7 +127,7 @@ def _mask_tile_png(mask: XYZPyramid, slide: XYZPyramid, z: int, x: int, y: int, 
         values = np.asarray(region.to_interleaved().numpy())
         canvas[:read_h, :read_w] = values[..., 0] if values.ndim == 3 else values
 
-    tissue = np.array(PIL.Image.fromarray(canvas).resize((tile_size, tile_size), PIL.Image.NEAREST))
+    tissue = np.array(PIL.Image.fromarray(canvas).resize((tile_size, tile_size), PIL.Image.Resampling.NEAREST))
     rgba = np.zeros((tile_size, tile_size, 4), dtype=np.uint8)
     for channel, level_value in enumerate(_MASK_RGB):
         rgba[..., channel] = np.where(tissue > 0, level_value, 0)
@@ -202,7 +203,9 @@ def create_app(
     @functools.lru_cache(maxsize=32)
     def slide_attention(slide_id: str) -> dict | None:
         """The slide's tile positions, raw logits and tile footprint, ready to send to the client."""
-        records = run.attention.get(slide_id) if run else None
+        if run is None:
+            return None
+        records = run.attention.get(slide_id)
         if records is None:
             return None
         opened = open_slide(slide_id)
@@ -311,23 +314,24 @@ def create_app(
                 "mask_declared": entry.mask_path is not None,
                 "attention": (
                     {
-                        "n_tiles": found["n_tiles"],
+                        "n_tiles": att["n_tiles"],
                         "label": run_label,
                         "aggregated": run.aggregated,
                         "inners": run.inners_by_outer.get(run.outer_of.get(slide, ""), []),
                         "consistency": _finite(run.consistency.get(slide)),
                     }
-                    if (found := slide_attention(slide)) is not None
+                    if run is not None and (att := slide_attention(slide)) is not None
                     else None
                 ),
                 "attention_available": run is not None,
-                # This fold's own prediction, not the cross-replicate ensemble the aggregate reports.
+                # The prediction of one inner replicate of the outer fold that tested the slide, or the
+                # mean over that fold's inner replicates when `run.aggregated`.
                 "prediction": (
                     {
-                        "prob": found.prob,
-                        "label": found.label,
-                        "endpoint_type": found.endpoint_type,
-                        "fold": found.fold,
+                        "prob": pred.prob,
+                        "label": pred.label,
+                        "endpoint_type": pred.endpoint_type,
+                        "fold": pred.fold,
                         "classes": {str(k): v for k, v in (run_classes or {}).items()},
                         "regression": (
                             {
@@ -342,14 +346,15 @@ def create_app(
                             if run.regression is not None
                             else None
                         ),
-                        # The predicted survival curve on this fold's own bin edges, plus the cohort
-                        # placement the unitless risk score needs to be readable.
+                        # The predicted survival curve on one replicate's bin edges, or on the union of the
+                        # replicates' edges when `run.aggregated`. Plus the cohort placement the unitless
+                        # risk score needs to be readable.
                         "survival": (
                             {
-                                "edges": found.survival.edges,
-                                "surv": found.survival.surv,
-                                "hazards": found.survival.hazards,
-                                "tail": found.survival.tail,
+                                "edges": pred.survival.edges,
+                                "surv": pred.survival.surv,
+                                "hazards": pred.survival.hazards,
+                                "tail": pred.survival.tail,
                                 "riskier_than": run.risk_percentile.get(slide),
                                 "n_slides": run.survival.n_slides if run.survival else None,
                                 "n_events": run.survival.n_events if run.survival else None,
@@ -359,11 +364,15 @@ def create_app(
                                 "km_times": run.survival.km_times if run.survival else [],
                                 "km_surv": run.survival.km_surv if run.survival else [],
                             }
-                            if found.survival is not None
+                            if pred.survival is not None
                             else None
                         ),
                     }
-                    if run and (found := run.predictions.get(slide)) is not None
+                    # An expression prediction is a vector of thousands of genes, which this panel cannot show
+                    # in a readable form, so an expression run shows its attention only.
+                    if run
+                    and (pred := run.predictions.get(slide)) is not None
+                    and pred.endpoint_type != Objective.regression_vector.value
                     else None
                 ),
                 "position": position,

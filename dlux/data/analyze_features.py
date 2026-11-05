@@ -136,8 +136,7 @@ def cost_ladder(counts: list[int]) -> list[PaddingCost]:
 
     One rung per quartile-ish landmark (p25/p50/p75/p95): the largest round size at or below that
     percentile, i.e. the size at which that share of slides still samples without replacement. Spans
-    the distribution in a few rows however skewed it is, rather than walking the ladder densely at the
-    bottom.
+    the distribution in a few rows however skewed it is.
     """
     array = np.asarray(counts, dtype=np.float64)
     sizes = set()
@@ -254,7 +253,7 @@ def render_summary(counts: list[int], manifest: dict, extraction: dict, out_dir:
         )
     lines.append("")
 
-    if dispersion > _SPREAD_LIMIT:
+    if recommended is None:
         lines += [
             f"**Two populations (p25 {stats['p25']:.0f}, p75 {stats['p75']:.0f}). No single value fits.**",
             "",

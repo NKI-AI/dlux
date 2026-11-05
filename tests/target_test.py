@@ -20,6 +20,7 @@ import json
 import math
 
 import pytest
+
 from dlux.config.cohort import ContractField
 from dlux.tasks.classification import EXCLUDED
 from dlux.tasks.target import build_field_transform, load_target_stats

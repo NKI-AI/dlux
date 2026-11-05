@@ -18,8 +18,7 @@ constructed in code, not through a polymorphic ``_target_``. Everything is deriv
 and artifact store from ``paths.mlflow_dir``, the experiment from ``experiment_name`` (the sweep), and
 the run name from ``split_version`` (the fold).
 
-**Backend = sqlite** (`sqlite:///{mlflow_dir}/mlflow.db`): one indexed DB + a separate artifact dir,
-which avoids the many-tiny-files / slow-UI / stale-NFS-handle issues of a file store. sqlite is
+Backend: sqlite (`sqlite:///{mlflow_dir}/mlflow.db`), one indexed DB plus a separate artifact dir. sqlite is
 single-writer, but logging is not on the critical path (results flow through the persisted NPZ/metadata
 and the aggregate stage), so a rare write-lock at worst drops a metric point.
 """

@@ -10,10 +10,10 @@ The full step-by-step walkthrough, with context and prerequisites, is the tutori
 
 ## What is in here
 
-- `catalog/` holds the two cohorts, the study, and the `baseline` experiment.
+- `catalog/` holds the two cohorts, the study, and the experiments.
 - `config/` holds the Phikon feature-extractor config and the cohort input-path structure.
 - `scripts/tcga_subtyping/` holds `make_manifest.py` (pin the slides from the GDC API) and `build_sheets.py` (turn the gdc-client output into the rigid sheets).
-- `local_paths.example.yaml` is the paths file for a public clone. Copy it to `config/local/paths/default.yaml`; it reads the output root from the `DLUX_ROOT` env var, so there is nothing to edit. The cohort data root is the `DLUX_EXAMPLE_DATA` env var.
+- The output root is the `DLUX_ROOT` env var, and the cohort data root is the `DLUX_EXAMPLE_DATA` env var.
 
 ## License and attribution
 

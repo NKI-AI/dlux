@@ -11,12 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Reads what one model of a sweep left behind, for inspection.
+"""Reads what the models of a sweep left behind, for inspection.
 
 A model is addressed by (study, experiment, cohort, field, inner). Each slide is tested by exactly one
 outer fold, so fixing the inner replicate and merging outer folds covers the cohort with one model per
-slide. Predictions here are that single model's own, not the cross-replicate ensemble the aggregate
-reports.
+slide. With a fixed inner replicate, a slide's prediction is that one model's own. With inner=None,
+it is the average over every inner replicate of the outer fold that tested the slide.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 
@@ -31,6 +32,7 @@ from dlux.eval.survival_metrics import bin_hazards, bin_survival, kaplan_meier
 
 _ATTENTION = "attention.npz"
 _PREDICTIONS = "test_predictions.npz"
+_SENTINEL = "metadata.json"  # written last when a run persists, so its presence means the fold is complete
 
 
 @dataclass(frozen=True)
@@ -142,6 +144,15 @@ def class_names(field: str, mapping: dict[str, int] | None) -> dict[int, str]:
     return {klass: f"{field} {', '.join(sorted(values))}" for klass, values in grouped.items()}
 
 
+class _SurvivalRow(NamedTuple):
+    """One usable survival prediction, reduced to the scalars the cohort statistics read."""
+
+    risk: float
+    time: float
+    event: float
+    patient: str
+
+
 def _survival_curve(logits: np.ndarray, edges: np.ndarray) -> SurvivalCurve:
     """One slide's hazard logits + this fold's bin edges -> the plottable survival curve."""
     hazards = bin_hazards(logits)
@@ -190,18 +201,21 @@ def _read_predictions(path: Path, fold: str) -> dict[str, SlidePrediction]:
         probs, labels, logits = handle["probs"], handle["labels"], handle["logits"]
         endpoint = str(handle["endpoint_type"]) if "endpoint_type" in handle.files else ""
         edges = handle["time_edges"] if "time_edges" in handle.files else None
-    if endpoint == "survival" and edges is None:
-        raise ValueError(
-            f"{path} holds survival predictions without `time_edges`, so its per-bin hazards cannot be "
-            "placed on a time axis. Re-run the fold so training persists the bin edges."
-        )
+    survival_edges: np.ndarray | None = None
+    if endpoint == "survival":
+        if edges is None:
+            raise ValueError(
+                f"{path} holds survival predictions without `time_edges`, so its per-bin hazards cannot be "
+                "placed on a time axis. Re-run the fold so training persists the bin edges."
+            )
+        survival_edges = edges
     out: dict[str, SlidePrediction] = {}
     for i, slide_id in enumerate(slide_ids):
         prob = probs[i].tolist() if probs.ndim > 1 else float(probs[i])
         label = None
         if labels is not None and len(labels):
             label = labels[i].tolist() if labels.ndim > 1 else float(labels[i])
-        curve = _survival_curve(logits[i], edges) if endpoint == "survival" else None
+        curve = _survival_curve(logits[i], survival_edges) if survival_edges is not None else None
         out[slide_id] = SlidePrediction(
             prob=prob,
             label=label,
@@ -221,15 +235,15 @@ def _regression_context(
     Returns ``(None, {})`` unless the endpoint is scalar regression with labels.
     """
     usable = {
-        k: v
+        k: (v.prob, v.label)
         for k, v in predictions.items()
-        if v.endpoint_type == "regression" and v.label is not None and not isinstance(v.prob, list)
+        if v.endpoint_type == "regression" and isinstance(v.prob, float) and isinstance(v.label, float)
     }
     if len(usable) < 2:
         return None, {}
     keys = list(usable)
-    pred = np.array([float(usable[k].prob) for k in keys])
-    true = np.array([float(usable[k].label) for k in keys])
+    pred = np.array([usable[k][0] for k in keys])
+    true = np.array([usable[k][1] for k in keys])
     abs_error = np.abs(pred - true)
     # Fraction of slides with a larger error, i.e. how many this slide beats.
     order = abs_error.argsort().argsort()
@@ -253,30 +267,33 @@ def _survival_context(
     Returns ``(None, {})`` unless the endpoint is survival with coupled ``[time, event]`` labels.
     """
     usable = {
-        k: v
+        k: _SurvivalRow(v.prob, float(v.label[0]), float(v.label[1]), v.patient_code or k)
         for k, v in predictions.items()
-        if v.endpoint_type == "survival" and isinstance(v.label, list) and len(v.label) == 2
+        if v.endpoint_type == "survival"
+        and isinstance(v.prob, float)
+        and isinstance(v.label, list)
+        and len(v.label) == 2
     }
     if len(usable) < 2:
         return None, {}
     keys = list(usable)
-    time = np.array([float(usable[k].label[0]) for k in keys])
-    event = np.array([float(usable[k].label[1]) for k in keys])
+    time = np.array([usable[k].time for k in keys])
+    event = np.array([usable[k].event for k in keys])
     # Both statistics below are about patients, so a patient with several slides counts once: their
     # (time, event) is a patient property, and their risk is the mean over their slides, the rollup
     # the aggregate uses, so the rank shown here agrees with the reported numbers.
     risk_by_patient: dict[str, list[float]] = {}
     label_by_patient: dict[str, tuple[float, float]] = {}
     for k in keys:
-        code = usable[k].patient_code or k
-        risk_by_patient.setdefault(code, []).append(float(usable[k].prob))
-        label_by_patient[code] = (float(usable[k].label[0]), float(usable[k].label[1]))
+        code = usable[k].patient
+        risk_by_patient.setdefault(code, []).append(usable[k].risk)
+        label_by_patient[code] = (usable[k].time, usable[k].event)
     codes = list(risk_by_patient)
     patient_risk = np.array([float(np.mean(risk_by_patient[c])) for c in codes])
     order = patient_risk.argsort().argsort()
     # Fraction of patients this one out-risks; every slide of a patient reports the patient's rank.
     rank_of = {c: float(order[i] / max(len(codes) - 1, 1)) for i, c in enumerate(codes)}
-    percentile = {k: rank_of[usable[k].patient_code or k] for k in keys}
+    percentile = {k: rank_of[usable[k].patient] for k in keys}
     pairs = np.asarray([label_by_patient[c] for c in codes], dtype=np.float64)
     km_times, km_surv = kaplan_meier(pairs[:, 0], pairs[:, 1])
     summary = SurvivalSummary(
@@ -329,7 +346,7 @@ def _average_predictions(entries: list[SlidePrediction], fold: str) -> SlidePred
     if isinstance(first.prob, list):
         prob: float | list[float] = np.mean([np.asarray(e.prob) for e in entries], axis=0).tolist()
     else:
-        prob = float(np.mean([float(e.prob) for e in entries]))
+        prob = float(np.mean(np.asarray([e.prob for e in entries], dtype=float)))
     curves = [e.survival for e in entries if e.survival is not None]
     return SlidePrediction(
         prob=prob,
@@ -350,7 +367,8 @@ def load_run_records(runs_dir: Path, field: str, inner: int | None) -> RunRecord
         inner: a single inner replicate, or None to average every replicate present.
 
     Returns:
-        The merged records, or None if no fold has an ``attention.npz``.
+        The merged records, or None if no complete fold has an ``attention.npz``. A fold is complete once its
+        run wrote ``metadata.json``, which persisting writes last.
 
     Raises:
         ValueError: two outer folds claim the same slide, or replicates of one outer fold disagree on
@@ -359,6 +377,8 @@ def load_run_records(runs_dir: Path, field: str, inner: int | None) -> RunRecord
     pattern = f"{field}_cv_o*_i*" if inner is None else f"{field}_cv_o*_i{inner}"
     by_outer: dict[str, list[Path]] = {}
     for path in sorted(runs_dir.glob(f"{pattern}/{_ATTENTION}")):
+        if not (path.parent / _SENTINEL).is_file():
+            continue  # a fold whose run has not finished persisting
         outer = path.parent.name.rsplit("_i", 1)[0]
         by_outer.setdefault(outer, []).append(path.parent)
 
